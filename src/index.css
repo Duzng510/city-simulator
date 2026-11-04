@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #05070c;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+canvas {
+  display: block;
+}
+
+input[type="range"] {
+  accent-color: #7dd3fc;
+}
+
+/* fill-mode backwards: after the entrance ends the element falls back to its
+   own styles, so :active scale feedback still works on the start button */
+.rise {
+  animation: rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation: none;
+  }
+}
