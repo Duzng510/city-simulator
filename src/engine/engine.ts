@@ -15,16 +15,17 @@ import { clamp, lerp, smooth, rng, rushHour } from './util'
 import { makeTextures } from './textures'
 import { makeBike, makeInterior } from './props'
 import { makeRain } from './weather'
-import { makeSteam, makeDrips, makeShafts, makeSpeedLines } from './fx'
+import { makeSteam, makeDrips, makeShafts, makeSpeedLines, makePigeons } from './fx'
 import { makeAmbient } from './audio'
 
-export type Tier = 'low' | 'medium' | 'high' | 'ultra'
+export type Tier = 'low' | 'medium' | 'high' | 'ultra' | 'max'
 export type Mode = 'player' | 'observe'
 
 export interface Effects {
   shadows: boolean
   ao: boolean
   bloom: boolean
+  rays: boolean
   grain: boolean
   grade: boolean
 }
@@ -47,14 +48,16 @@ const CONF: Record<Tier, { ratio: number; shadow: number; samples: number; post:
   medium: { ratio: 1.0, shadow: 1024, samples: 2, post: true, fog: 0.0022, aoBlend: 0.55 },
   high: { ratio: 1.35, shadow: 2048, samples: 4, post: true, fog: 0.0018, aoBlend: 0.7 },
   ultra: { ratio: 1.6, shadow: 4096, samples: 4, post: true, fog: 0.0015, aoBlend: 0.85 },
+  max: { ratio: 2.0, shadow: 8192, samples: 8, post: true, fog: 0.0013, aoBlend: 0.95 },
 }
-const TIERS: Tier[] = ['low', 'medium', 'high', 'ultra']
+const TIERS: Tier[] = ['low', 'medium', 'high', 'ultra', 'max']
 
 const DAY = new THREE.Color(0xa6bed8)
 const DUSK = new THREE.Color(0xd07840)
 const NIGHT = new THREE.Color(0x080e1a)
 const GREY = new THREE.Color(0x6b7684)
 const WHITE = new THREE.Color(0xffffff)
+const STORM = new THREE.Color(0.4, 0.4, 0.45)
 
 const GRAIN_SHADER = {
   uniforms: { tDiffuse: { value: null }, time: { value: 0 }, amount: { value: 0.04 }, vignette: { value: 0.45 } },
@@ -91,6 +94,41 @@ void main() {
   gl_FragColor = c;
 }`,
 }
+
+// C11 — fake god rays: threshold + radial blur from one light's screen position. The threshold
+// doubles as the occlusion test (a lamp behind a wall contributes no bright pixels), which is why
+// this needs no depth pre-pass. Tap count is baked in so the loop bound stays a compile-time const.
+const raysShader = (taps: number) => ({
+  uniforms: {
+    tDiffuse: { value: null },
+    uOrigin: { value: new THREE.Vector2(0.5, 0.5) },
+    uTint: { value: new THREE.Color(0xffe0b0) },
+    uAmount: { value: 0 },
+  },
+  vertexShader: 'varying vec2 vUv;\nvoid main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse;
+uniform vec2 uOrigin;
+uniform vec3 uTint;
+uniform float uAmount;
+varying vec2 vUv;
+#define TAPS ${taps}
+void main() {
+  vec4 base = texture2D(tDiffuse, vUv);
+  vec2 dv = (vUv - uOrigin) * (1.35 / float(TAPS));
+  vec2 coord = vUv;
+  float illum = 1.0;
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < TAPS; i++) {
+    coord -= dv;
+    float inside = step(0.0, coord.x) * step(coord.x, 1.0) * step(0.0, coord.y) * step(coord.y, 1.0);
+    vec3 s = texture2D(tDiffuse, coord).rgb * inside;
+    s *= smoothstep(0.68, 0.95, max(s.r, max(s.g, s.b))) * uTint;
+    acc += s * illum;
+    illum *= 0.93;
+  }
+  gl_FragColor = vec4(base.rgb + acc * (uAmount / float(TAPS)), base.a);
+}`,
+})
 
 export const FILTERS = {
   none: { lift: 0.015, gamma: 0.98, gain: 1.02, sat: 1.08, tint: [1, 1, 1] },
@@ -213,6 +251,10 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   shafts.mesh.renderOrder = 5
   scene.add(shafts.mesh)
 
+  // D11 — pigeons scatter from the food carts and bins when you walk up
+  const pigeons = makePigeons([...city.carts, ...city.trash])
+  scene.add(pigeons.mesh)
+
   const q = new URLSearchParams(location.search)
   const rain = makeRain(tex.rain, Number(q.get('rain')) || 0)
   let rainTarget = rain.amount
@@ -232,9 +274,9 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   scene.add(rain.points)
   scene.add(rain.splashes)
   const ambient = makeAmbient()
-  ents.onHonk(() => ambient.horn())
-  ents.onMeow(() => ambient.meow())
-  ents.onSiren(() => ambient.siren())
+  ents.onHonk((x, z) => ambient.horn(x, z))
+  ents.onMeow((x, z) => ambient.meow(x, z))
+  ents.onSiren((x, z) => ambient.siren(x, z))
   let stepAcc = 0
 
   const player = makePlayer(city.spawn)
@@ -358,6 +400,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     car.lat = lat
     camPos.set(car.x + car.vx * dt, 0, car.z + car.vz * dt)
     city.hit(camPos, 1.4)
+    ents.vehPush(camPos, 1.4)
     car.x = camPos.x
     car.z = camPos.z
     ents.drive(car.x, car.z, car.yaw, car.roll, car.pitch, thr < 0 ? 1 : 0)
@@ -404,6 +447,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     bike.yaw -= steer * 3.1 * dt * (bike.sp / MAX)
     camPos.set(bike.x + Math.sin(bike.yaw) * bike.sp * dt, 0, bike.z + Math.cos(bike.yaw) * bike.sp * dt)
     city.hit(camPos, 0.5)
+    ents.vehPush(camPos, 0.5)
     bike.x = camPos.x
     bike.z = camPos.z
     bikeModel.position.set(bike.x, 0, bike.z)
@@ -506,7 +550,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
         holdingCan = true
         canMesh.visible = true
         onLine?.('Bạn mua một lon nước.')
-        ambient.clunk()
+        ambient.clunk(vbest.x, vbest.z)
         return
       }
       // food cart (feature 2): buy a bánh mì from the market cart — the payoff beat for the steam
@@ -521,7 +565,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       }
       if (cbest) {
         onLine?.('Bạn mua một ổ bánh mì.')
-        ambient.sizzle()
+        ambient.sizzle(cbest.x, cbest.z)
         return
       }
       // litter (B5): holding a can makes every bin on the block worth walking over to
@@ -539,7 +583,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
           holdingCan = false
           canMesh.visible = false
           onLine?.('Bạn vứt lon vào thùng rác.')
-          ambient.clunk()
+          ambient.clunk(tbest.x, tbest.z)
           return
         }
       }
@@ -609,6 +653,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     player.root.visible = !on
     rain.points.visible = !on
     rain.splashes.visible = !on
+    pigeons.mesh.visible = !on
     sky.visible = !on
     stars.visible = !on
     moon.visible = !on
@@ -728,17 +773,19 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   pmrem.compileEquirectangularShader()
   let envDoneHour = -99
 
-  let tier: Tier = 'medium'
+  let tier: Tier = 'low'
   let mode: Mode = 'player'
   let hour = Number(q.get('h')) || 17.8
   let timeScale = 240
   let bloomGain = 1
+  let raysGain = 1
+  let duskNow = 0
   let motion = 0
   let caAmt = 0
   let paused = false
   let warmupT = 0
   let idle = false
-  let effects: Effects = { shadows: true, ao: true, bloom: true, grain: true, grade: true }
+  let effects: Effects = { shadows: true, ao: true, bloom: true, rays: true, grain: true, grade: true }
 
   let composer: EffectComposer | null = null
   let bloom: UnrealBloomPass | null = null
@@ -747,8 +794,9 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   let gtao: GTAOPass | null = null
   let gtaoK = 1
   let gradePass: ShaderPass | null = null
+  let raysPass: ShaderPass | null = null
   let filter: Filter = 'none'
-  let adaptive = q.get('adaptive') !== '0'
+  let adaptive = q.get('adaptive') === '1'
   let probeT = 0
   let probeMin = 1e9
   let goodT = 0
@@ -798,11 +846,19 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     })
     composer.dispose()
     composer = null
+    if (reflRT) {
+      reflRT.dispose()
+      reflRT = null
+      reflU.tex.value = null
+      reflU.amt.value = 0
+      reflOn = false
+    }
     bloom = null
     afterimage = null
     grain = null
     gtao = null
     gradePass = null
+    raysPass = null
   }
 
   function applyTier() {
@@ -823,8 +879,9 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       if (effects.ao) {
         gtao = new GTAOPass(scene, camera, size.x, size.y)
         gtao.output = GTAOPass.OUTPUT.Default
-        const aoR = tier === 'ultra' ? 1.2 : tier === 'high' ? 1.0 : 0.7
-        const aoD = tier === 'ultra' ? 1.5 : tier === 'high' ? 1.35 : 1.2
+        const top = tier === 'ultra' || tier === 'max'
+        const aoR = top ? 1.2 : tier === 'high' ? 1.0 : 0.7
+        const aoD = top ? 1.5 : tier === 'high' ? 1.35 : 1.2
         gtao.updateGtaoMaterial({ radius: aoR, distanceExponent: aoD, thickness: 1.5, scale: 1.0 })
         gtao.blendIntensity = c.aoBlend
         // half-res AO: the pass re-renders the whole scene for normals, so shrinking its
@@ -837,6 +894,13 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
         composer.addPass(bloom)
       }
       composer.addPass(new OutputPass())
+      // C11 runs on the tonemapped frame so the 0.68 threshold maps to "visibly blown out";
+      // gated per frame, and taps scale with tier because UHD can't afford 28 fetches at 2x
+      if (effects.rays) {
+        raysPass = new ShaderPass(raysShader(tier === 'medium' ? 12 : tier === 'high' ? 20 : 28))
+        raysPass.enabled = false
+        composer.addPass(raysPass)
+      }
       // afterimage keeps its own history buffer, so it stays in the chain and is gated per frame
       afterimage = new AfterimagePass(0)
       afterimage.enabled = false
@@ -848,8 +912,16 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       }
       if (effects.grain) {
         grain = new ShaderPass(GRAIN_SHADER)
-        grain.uniforms.amount.value = tier === 'high' || tier === 'ultra' ? 0.055 : 0.03
+        grain.uniforms.amount.value = tier === 'high' || tier === 'ultra' || tier === 'max' ? 0.055 : 0.03
         composer.addPass(grain)
+      }
+      // D12: medium trở xuống không còn draw call budget cho lần render gương thứ hai
+      reflOn = TIERS.indexOf(tier) >= 2
+      if (reflOn) {
+        reflRT = new THREE.WebGLRenderTarget(Math.floor(size.x / 2), Math.floor(size.y / 2), {
+          type: THREE.HalfFloatType,
+        })
+        reflU.tex.value = reflRT.texture
       }
     }
     resize()
@@ -861,6 +933,134 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     gtao.setSize(Math.floor(size.x * gtaoK), Math.floor(size.y * gtaoK))
   }
 
+  // D12: mặt đất ướt gương lại thành phố. Một lần render half-res qua camera lật theo y=0,
+  // asphalt + puddle lấy mẫu theo vị trí world đã chiếu — với mặt phẳng nằm ngang thì đây là
+  // ảnh gương chính xác, không phải xấp xỉ, và rẻ hơn SSR (SSR cần thêm một lần depth prepass
+  // cho cả scene). Chỉ chạy khi thật sự thấy được: đêm + mưa + tier high trở lên.
+  let reflRT: THREE.WebGLRenderTarget | null = null
+  let reflOn = false
+  const reflCam = new THREE.PerspectiveCamera()
+  reflCam.matrixAutoUpdate = false // ma trận world do ta ghi trực tiếp (phép lật có det = -1)
+  const reflMirror = new THREE.Matrix4().makeScale(1, -1, 1)
+  const reflVP = new THREE.Matrix4()
+  const reflU = {
+    tex: { value: null as THREE.Texture | null },
+    vp: { value: reflVP },
+    amt: { value: 0 },
+  }
+  const reflBias = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+  const reflPlane = new THREE.Plane()
+  const reflClip = new THREE.Vector4()
+  const reflQ = new THREE.Vector4()
+  const Y_UP = new THREE.Vector3(0, 1, 0)
+  const GROUND = new THREE.Vector3()
+
+  const REFL_PARS = `
+varying vec3 vWPos;
+uniform sampler2D uReflTex;
+uniform mat4 uReflVP;
+uniform float uReflAmt;
+vec2 reflUv( vec2 d ) {
+\tvec4 c = uReflVP * vec4( vWPos, 1.0 );
+\tc.xy += d;
+\treturn c.w > 0.0 ? c.xy / c.w : vec2( - 1.0 );
+}`
+
+  const REFL_VERT = `
+#ifdef USE_INSTANCING
+\tvWPos = ( modelMatrix * instanceMatrix * vec4( transformed, 1.0 ) ).xyz;
+#else
+\tvWPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+#endif`
+
+  function injectRefl(mat: THREE.Material, hook: string, body: string) {
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uReflTex = reflU.tex
+      sh.uniforms.uReflVP = reflU.vp
+      sh.uniforms.uReflAmt = reflU.amt
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;')
+        .replace('#include <project_vertex>', '#include <project_vertex>' + REFL_VERT)
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <common>', '#include <common>' + REFL_PARS)
+        .replace(hook, hook + body)
+    }
+  }
+
+  // gương nhân theo fresnel (dọc theo tia nhìn thì mặt đất phản chiếu mạnh) và nhòe theo độ nhám
+  const REFL_ASPHALT = `
+\tif ( uReflAmt > 0.0 ) {
+\t\tfloat ndv = clamp( dot( normalize( vViewPosition ), normal ), 0.0, 1.0 );
+\t\tfloat b = 0.004 + 0.05 * roughnessFactor;
+\t\tvec3 rr = texture2D( uReflTex, reflUv( vec2( b ) ) ).rgb + texture2D( uReflTex, reflUv( vec2( - b ) ) ).rgb + texture2D( uReflTex, reflUv( vec2( 0.0 ) ) ).rgb;
+\t\ttotalEmissiveRadiance += ( rr * 0.3333 ) * uReflAmt * mix( 0.05, 0.6, pow( 1.0 - ndv, 4.0 ) ) * ( 1.0 - roughnessFactor );
+\t}`
+
+  // vũng nước là gương sắc: 2 tap, lệch theo gợn sóng của chính texture puddle
+  const REFL_PUDDLE = `
+\tif ( uReflAmt > 0.0 ) {
+#ifdef USE_MAP
+\t\tvec2 rip = ( texture2D( map, vMapUv ).rg - 0.5 ) * 0.04;
+#else
+\t\tvec2 rip = vec2( 0.0 );
+#endif
+\t\tvec3 rr = texture2D( uReflTex, reflUv( rip ) ).rgb + texture2D( uReflTex, reflUv( rip + vec2( 0.008, - 0.006 ) ) ).rgb;
+\t\toutgoingLight += rr * 0.5 * uReflAmt;
+\t}`
+
+  injectRefl(city.asphaltMat, '#include <emissivemap_fragment>', REFL_ASPHALT)
+  injectRefl(city.puddles.material as THREE.MeshBasicMaterial, '#include <envmap_fragment>', REFL_PUDDLE)
+
+  function drawRefl() {
+    if (!reflRT) return
+    camera.updateMatrixWorld()
+    // camera ảo = camera thật nhân qua phép lật y=0; sao đó lật trục x trong clip space để trả
+    // lại thứ tự mặt (phép lật làm đảo winding) — cách ba làm trong Reflector
+    reflCam.matrix.multiplyMatrices(reflMirror, camera.matrixWorld)
+    reflCam.matrixWorld.copy(reflCam.matrix)
+    reflCam.matrixWorldInverse.copy(reflCam.matrix).invert()
+    reflCam.near = camera.near
+    reflCam.far = camera.far
+    reflCam.projectionMatrix.copy(camera.projectionMatrix)
+    const p = reflCam.projectionMatrix.elements
+    p[8] *= -1
+    p[12] *= -1
+    reflVP.copy(reflBias).multiply(reflCam.projectionMatrix).multiply(reflCam.matrixWorldInverse)
+    // mặt phẳng gần nghiêng (Lengyel) để camera ảo không nhìn xuyên xuống dưới lòng đường
+    reflPlane.setFromNormalAndCoplanarPoint(Y_UP, GROUND)
+    reflPlane.applyMatrix4(reflCam.matrixWorldInverse)
+    reflClip.set(reflPlane.normal.x, reflPlane.normal.y, reflPlane.normal.z, reflPlane.constant)
+    reflQ.x = (Math.sign(reflClip.x) + p[8]) / p[0]
+    reflQ.y = (Math.sign(reflClip.y) + p[9]) / p[5]
+    reflQ.z = -1
+    reflQ.w = (1 + p[10]) / p[14]
+    reflClip.multiplyScalar(2 / reflClip.dot(reflQ))
+    p[2] = reflClip.x
+    p[6] = reflClip.y
+    p[10] = reflClip.z + 1 - 0.002
+    p[14] = reflClip.w
+    reflCam.projectionMatrixInverse.copy(reflCam.projectionMatrix).invert()
+    // puddle không được tự soi mình (vòng phản hồi sáng); các quad glow giả — vũng sáng 17×17 dưới
+    // đèn và vệt neon trên mặt đường — cũng phải ẩn, không chúng biến gương thành một bãi sữa
+    const pudOn = city.puddles.visible
+    const poolOn = city.pools.visible
+    const neonOp = city.neonReflMat.opacity
+    city.puddles.visible = false
+    city.pools.visible = false
+    city.neonReflMat.opacity = 0
+    const shAuto = renderer.shadowMap.autoUpdate
+    renderer.shadowMap.autoUpdate = false
+    const cur = renderer.getRenderTarget()
+    renderer.setRenderTarget(reflRT)
+    if (!renderer.autoClear) renderer.clear()
+    renderer.render(scene, reflCam)
+    renderer.setRenderTarget(cur)
+    renderer.shadowMap.autoUpdate = shAuto
+    city.puddles.visible = pudOn
+    city.pools.visible = poolOn
+    city.neonReflMat.opacity = neonOp
+  }
+
   function resize() {
     const w = canvas.clientWidth || 1280
     const h = canvas.clientHeight || 720
@@ -869,10 +1069,15 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     renderer.setSize(w, h, false)
     composer?.setSize(w, h)
     sizeGtao()
+    if (reflRT) {
+      renderer.getDrawingBufferSize(size)
+      reflRT.setSize(Math.floor(size.x / 2), Math.floor(size.y / 2))
+    }
   }
 
   const sunDir = new THREE.Vector3()
   const moonDir = new THREE.Vector3()
+  const raysV = new THREE.Vector3()
   const fogCol = new THREE.Color()
   const LAT = (21 * Math.PI) / 180
   const DEC = (18 * Math.PI) / 180
@@ -884,11 +1089,15 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     const el = Math.asin(clamp(sinEl, -1, 1))
     const az = Math.atan2(-Math.sin(H), Math.tan(DEC) * Math.cos(LAT) - Math.sin(LAT) * Math.cos(H))
     sunDir.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el))
-    const day = smooth(-0.06, 0.16, sinEl)
+    const day0 = smooth(-0.06, 0.16, sinEl)
+    const day = day0 * (1 - 0.7 * stormLvl)
     const dusk = smooth(0.3, 0, Math.abs(sinEl)) * day
     su.sunPosition.value.copy(sunDir)
     su.dusk.value = dusk
+    duskNow = dusk
     su.rayleigh.value = lerp(0.35, 2.2, day)
+    su.turbidity.value = 7 + 8 * stormLvl
+    su.mieCoefficient.value = 0.006 + 0.05 * stormLvl
     sun.position.copy(sunDir).multiplyScalar(260)
     sun.color.setRGB(1, lerp(0.72, 0.97, smooth(0.02, 0.35, sinEl)), lerp(0.5, 0.92, smooth(0.02, 0.35, sinEl)))
     sun.intensity = 3.0 * day
@@ -904,9 +1113,12 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       hemi.intensity += 0.25 * wet
     }
     scene.fog!.color.copy(fogCol)
-    ;(scene.fog as THREE.FogExp2).density = CONF[tier].fog * (1 - 0.25 * dusk) * (1 - 0.3 * wet)
+    // C9 dawn fog bank: ground mist thickens across 5:30-6:00 and burns off by 7:30, clear nights only
+    let dawnFog = 0
+    if (t > 5.5 && t < 7.5 && wet < 0.1) dawnFog = smooth(5.5, 6, t) * (1 - smooth(6.6, 7.5, t))
+    ;(scene.fog as THREE.FogExp2).density = CONF[tier].fog * (1 - 0.25 * dusk) * (1 - 0.3 * wet) * (1 + dawnFog)
     renderer.toneMappingExposure = lerp(0.7, 0.95, day)
-    const night = 1 - day
+    const night = 1 - day0
     uNight.value = night
     uHour.value = t
     shafts.mat.uniforms.uGate.value = smooth(-0.05, 0.05, sinEl) * (1 - smooth(0.18, 0.45, sinEl)) * (1 - 0.7 * wet)
@@ -930,10 +1142,11 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     starMat.opacity = night
     stars.visible = night > 0.05
     moonMat.opacity = night * 0.9
-    cloudMat.opacity = day * (0.35 + 0.4 * wet)
+    cloudMat.opacity = day0 * (0.35 + 0.4 * wet + 0.5 * stormLvl)
     cloudMat.color.setRGB(1 - 0.35 * wet, 1 - 0.35 * wet, 1 - 0.45 * wet)
+    if (stormLvl > 0) cloudMat.color.lerp(STORM, stormLvl)
     clouds.rotation.y = t * 0.01
-    clouds.visible = day > 0.02
+    clouds.visible = day0 > 0.02
     if (Math.abs(day - lastDay) > 0.01) {
       lastDay = day
       ambient.setDay(day)
@@ -944,6 +1157,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   const focus = new THREE.Vector3()
   const hudFx = new THREE.Vector3()
   const hudDir = new THREE.Vector3()
+  const audFwd = new THREE.Vector3()
   const envScene = new THREE.Scene()
   function refreshEnv() {
     scene.remove(sky)
@@ -960,7 +1174,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     focus.copy(mode === 'player' ? player.pos : observer.pos)
     sun.target.position.set(focus.x, 0, focus.z)
     sun.position.set(focus.x, 0, focus.z).addScaledVector(sunDir, 260)
-    const r = tier === 'high' || tier === 'ultra' ? 170 : 120
+    const r = tier === 'high' || tier === 'ultra' || tier === 'max' ? 170 : 120
     const c = sun.shadow.camera
     c.left = -r
     c.right = r
@@ -1064,6 +1278,14 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   let clock = 0
   let oneShotT = 20 + Math.random() * 20
   let sirenT = 0
+  // D9 thunderstorm: level ramps 0→1 over ~2s; bolts fire on boltT, thunder lags by boltD
+  let stormLvl = 0
+  let stormEnd = -1
+  let stormCheck = 0
+  let boltT = 0
+  let boltFlash = 0
+  let thunderAt = -1
+  let boltPow = 1
   let acc = 0
   let frames = 0
   let fps = 0
@@ -1162,6 +1384,17 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       return
     }
     if (!paused) hour = (hour + (dt * timeScale) / 3600) % 24
+    // D9 thunderstorm: sustained heavy rain (~every 4s, 5%) seeds a 60-120s cell; level ramps in/out
+    if (!paused) {
+      if (stormEnd < clock && rain.amount > 0.7 && clock > stormCheck) {
+        stormCheck = clock + 4
+        if (Math.random() < 0.05) {
+          stormEnd = clock + 60 + Math.random() * 60
+          boltT = 1 + Math.random() * 3
+        }
+      }
+      stormLvl += ((stormEnd > clock ? 1 : 0) - stormLvl) * Math.min(1, dt * 0.6)
+    }
     const { day, night } = skyFor(hour)
     nightNow = night
 
@@ -1197,6 +1430,8 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       camera.lookAt(sitLook)
     } else if (mode === 'player') {
       player.update(paused ? 0 : dt, keys, city, isCoarse ? touchMove : undefined)
+      // B1: no walking through traffic
+      if (!paused && !sitting) ents.carPush(player.pos)
       if (standEase > 0) easeCam.copy(camera.position)
       player.aim(camera, city, paused ? 0 : dt)
       if (standEase > 0) {
@@ -1245,7 +1480,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     }
     ambient.setZone(zp, zm, zl)
     const busProx = clamp(1 - Math.hypot(fx.x - busX, fx.z - busZ) / 22, 0, 1) * night
-    ambient.setBusker(busProx)
+    ambient.setBusker(busProx, busX, busZ)
     buskerGather += dt
     if (busProx > 0.2 && buskerGather > 2) {
       buskerGather = 0
@@ -1257,13 +1492,44 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     for (const a of city.acHumSpots) zac = Math.max(zac, clamp(1 - Math.hypot(fx.x - a.x, fx.z - a.z) / 14, 0, 1))
     for (const c of city.constructionSpots) zdr = Math.max(zdr, clamp(1 - Math.hypot(fx.x - c.x, fx.z - c.z) / 24, 0, 1))
     ambient.setBuild(zac, zdr)
+    // C10 spatial audio: listener rides the camera; wet mix drops to zero inside a shop and slides from street tail to alley slap near alleySpots
+    camera.getWorldDirection(audFwd)
+    ambient.setListener(camera.position.x, camera.position.y, camera.position.z, audFwd.x, audFwd.y, audFwd.z)
+    let alley = 0
+    for (const a of city.alleySpots) alley = Math.max(alley, clamp(1 - Math.hypot(fx.x - a.x, fx.z - a.z) / 8, 0, 1))
+    ambient.setReverb(inside ? 0 : 0.12 * (1 - alley), inside ? 0 : 0.35 * alley)
     if (city.lampGlow.visible) placeLamps(fx)
     stars.position.copy(camera.position)
-    rain.update(paused ? 0 : dt, camera.position, paused ? 0 : rainTarget)
+    rain.update(paused ? 0 : dt, camera.position, paused ? 0 : Math.min(1, rainTarget * (1 + 0.5 * stormLvl)))
+    pigeons.update(paused ? 0 : dt, fx.x, fx.z, clock)
     if (rain.flash > 0) {
-      hemi.intensity += rain.flash * 3.5
+      hemi.intensity += rain.flash * (3.5 + 4.5 * stormLvl)
       fogCol.lerp(WHITE, rain.flash * 0.5)
       scene.fog!.color.copy(fogCol)
+    }
+    // D9 lightning: bolts every 4-8s bleach hemi (×8) + the Preetham sky; thunder lags 1-3s by distance
+    if (stormLvl > 0.5 && !paused) {
+      boltT -= dt
+      if (boltT <= 0) {
+        boltT = 4 + Math.random() * 4
+        boltFlash = 1
+        const dist = 1 + Math.random() * 2
+        thunderAt = clock + dist
+        boltPow = clamp(1.5 - dist * 0.35, 0.4, 1)
+      }
+    }
+    if (boltFlash > 0) {
+      hemi.intensity += boltFlash * 8 * stormLvl
+      su.turbidity.value += boltFlash * 15
+      su.mieCoefficient.value += boltFlash * 0.3
+      fogCol.lerp(WHITE, boltFlash * 0.6)
+      scene.fog!.color.copy(fogCol)
+      renderer.toneMappingExposure += boltFlash * 0.6
+      boltFlash = Math.max(0, boltFlash - dt * 12)
+    }
+    if (thunderAt >= 0 && clock >= thunderAt) {
+      ambient.thunder(0, boltPow)
+      thunderAt = -1
     }
     if (grain) grain.uniforms.time.value = clock
     followShadow(night)
@@ -1289,6 +1555,60 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       refreshEnv()
     }
 
+    // C11 one origin per frame: the sun (or the anti-sun moon) when it's in frame, else the lit
+    // street lamp closest to screen centre — at night that's the bright thing you're looking at.
+    if (raysPass) {
+      camera.updateMatrixWorld()
+      const sky = day > 0.02
+      raysV.copy(camera.position).addScaledVector(sunDir, 700 * (sky ? 1 : -1)).project(camera)
+      let amt = 0
+      let ox = 0.5
+      let oy = 0.5
+      let tint = 0xffdca8
+      if (raysV.z < 1 && Math.abs(raysV.x) < 1.3 && Math.abs(raysV.y) < 1.3) {
+        amt = sky ? (0.12 + 0.88 * duskNow) * day * (1 - 0.85 * stormLvl) : night * 0.3
+        ox = raysV.x * 0.5 + 0.5
+        oy = raysV.y * 0.5 + 0.5
+        if (!sky) tint = 0xbcd2ff
+      }
+      if (night > 0.05) {
+        let lAmt = 0
+        let lx = 0
+        let ly = 0
+        for (const l of lamps) {
+          if (l.position.y < 0) continue
+          raysV.copy(l.position).project(camera)
+          if (raysV.z > 1) continue
+          const d = Math.hypot(raysV.x, raysV.y)
+          if (d > 1) continue
+          const a = night * (0.5 - 0.4 * d)
+          if (a > lAmt) {
+            lAmt = a
+            lx = raysV.x * 0.5 + 0.5
+            ly = raysV.y * 0.5 + 0.5
+          }
+        }
+        if (lAmt > amt) {
+          amt = lAmt
+          ox = lx
+          oy = ly
+          tint = 0xffc98a
+        }
+      }
+      amt *= raysGain * (1 + 0.6 * rain.amount)
+      raysPass.enabled = amt > 0.02
+      if (raysPass.enabled) {
+        ;(raysPass.uniforms.uOrigin.value as THREE.Vector2).set(ox, oy)
+        ;(raysPass.uniforms.uTint.value as THREE.Color).setHex(tint)
+        raysPass.uniforms.uAmount.value = Math.min(1.5, amt)
+      }
+    }
+
+    // D12: đêm + mưa mới có gương; ban ngày asphalt nhám nên render thừa cũng không thấy gì
+    const rAmt = reflOn ? night * clamp(rain.amount * 1.6, 0, 1) : 0
+    if (rAmt > 0.03) drawRefl()
+    reflU.amt.value = rAmt
+
     if (composer) composer.render(dt)
     else renderer.render(scene, camera)
 
@@ -1308,6 +1628,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
   if (q.get('tier')) tier = q.get('tier') as Tier
   if (q.get('mode')) mode = q.get('mode') as Mode
   if (q.get('bloom')) bloomGain = clamp(Number(q.get('bloom')), 0, 2)
+  if (q.get('rays')) raysGain = clamp(Number(q.get('rays')), 0, 2)
   const fxOff = (q.get('fx') || '').split(',').filter(Boolean)
   if (fxOff.length) {
     effects = { ...effects, ...Object.fromEntries(fxOff.map((k) => [k, false])) } as Effects
@@ -1358,6 +1679,9 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
     },
     setBloom(g: number) {
       bloomGain = g
+    },
+    setRays(g: number) {
+      raysGain = clamp(g, 0, 2)
     },
     setMotion(v: number) {
       motion = clamp(v, 0, 1)
@@ -1414,7 +1738,7 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       observer.apply(camera)
     },
     getState() {
-      return { h: hour, rain: rainTarget, tier, mode, bloom: bloomGain, effects }
+      return { h: hour, rain: rainTarget, tier, mode, bloom: bloomGain, rays: raysGain, effects }
     },
     hud() {
       camera.getWorldDirection(hudDir)
@@ -1446,6 +1770,8 @@ export function createEngine(canvas: HTMLCanvasElement, onStats: (s: Stats) => v
       fadeMat.dispose()
       rain.points.geometry.dispose()
       rain.splashes.geometry.dispose()
+      pigeons.mesh.geometry.dispose()
+      ;(pigeons.mesh.material as THREE.Material).dispose()
       sky.geometry.dispose()
       ;(sky.material as THREE.ShaderMaterial).dispose()
       ambient.dispose()

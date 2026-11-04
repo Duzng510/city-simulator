@@ -21,7 +21,7 @@ export function makeRain(streak: THREE.Texture, init = 0) {
   points.frustumCulled = false
   points.visible = false
 
-  // rain splashes on the ground — tiny additive points that blink and die
+  // rain splashes on the ground — additive point sprites that bloom into an expanding ring then die
   const SPLASH_N = 90
   const splashPos = new Float32Array(SPLASH_N * 3)
   const splashLife = new Float32Array(SPLASH_N)
@@ -33,9 +33,31 @@ export function makeRain(streak: THREE.Texture, init = 0) {
   }
   const splashGeo = new THREE.BufferGeometry()
   splashGeo.setAttribute('position', new THREE.BufferAttribute(splashPos, 3))
-  const splashMat = new THREE.PointsMaterial({
-    size: 0.18, sizeAttenuation: true, transparent: true, opacity: 0,
-    depthWrite: false, color: 0xb8d4ec, blending: THREE.AdditiveBlending,
+  splashGeo.setAttribute('aLife', new THREE.BufferAttribute(splashLife, 1))
+  const splashMat = new THREE.ShaderMaterial({
+    uniforms: { uOp: { value: 0 } },
+    vertexShader: `
+      attribute float aLife;
+      varying float vL;
+      void main() {
+        vL = aLife;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = 26.0 * clamp(120.0 / max(0.001, -mv.z), 0.2, 3.0);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform float uOp;
+      varying float vL;
+      void main() {
+        float t = 1.0 - vL;                     // 0 birth -> 1 death
+        float d = length(gl_PointCoord * 2.0 - 1.0);
+        float a = smoothstep(0.35, 0.0, abs(d - (0.2 + 0.8 * t))) * vL * uOp;
+        if (a < 0.02) discard;
+        gl_FragColor = vec4(0.72, 0.83, 0.95, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
   })
   const splashes = new THREE.Points(splashGeo, splashMat)
   splashes.frustumCulled = false
@@ -71,7 +93,7 @@ export function makeRain(streak: THREE.Texture, init = 0) {
     // splash particles at ground level
     if (amount > 0.2) {
       splashes.visible = true
-      splashMat.opacity = amount * 0.55
+      splashMat.uniforms.uOp.value = amount * 0.9
       for (let i = 0; i < SPLASH_N; i++) {
         splashLife[i] -= dt * 2.5
         if (splashLife[i] <= 0) {
@@ -82,6 +104,7 @@ export function makeRain(streak: THREE.Texture, init = 0) {
         }
       }
       splashGeo.attributes.position.needsUpdate = true
+      splashGeo.attributes.aLife.needsUpdate = true
     } else {
       splashes.visible = false
     }

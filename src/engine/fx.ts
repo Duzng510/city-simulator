@@ -116,6 +116,81 @@ export function makeSpeedLines(count = 220) {
 export const makeDrips = (spots: { x: number; y: number; z: number }[], map: THREE.Texture) =>
   puffs(spots, map, { per: 6, dist: -1.5, size: 4, grow: 0.2, color: 0xaecbe0, fade: 0.55, add: true, alpha: 0.8 })
 
+// D11: pigeons pecking around a spot (a food cart, a bin). A few instanced grey birds that scatter
+// in a flutter when the player steps close, circle for a couple seconds, then settle back down.
+// No per-frame allocation — one scratch matrix/euler and typed arrays, so it's cheap to run every frame.
+export function makePigeons(spots: { x: number; z: number }[], per = 3) {
+  const n = spots.length * per
+  const base = new Float32Array(n * 2) // home x/z
+  const cur = new Float32Array(n * 3) // current x/y/z
+  const sc = new Float32Array(n) // scared timer (>0 = airborne)
+  const ph = new Float32Array(n) // phase: orbit dir + flap offset
+  for (let i = 0; i < n; i++) {
+    const s = spots[(i / per) | 0]
+    const a = Math.random() * Math.PI * 2
+    const r = Math.random() * 1.4
+    base[i * 2] = s.x + Math.cos(a) * r
+    base[i * 2 + 1] = s.z + Math.sin(a) * r
+    cur[i * 3] = base[i * 2]
+    cur[i * 3 + 1] = 0.08
+    cur[i * 3 + 2] = base[i * 2 + 1]
+    ph[i] = Math.random() * Math.PI * 2
+  }
+  const body = new THREE.BoxGeometry(0.1, 0.13, 0.22)
+  const wing = new THREE.BoxGeometry(0.34, 0.02, 0.14).translate(0, 0.02, 0)
+  const geo = (() => {
+    const g = new THREE.BufferGeometry()
+    const b = body.toNonIndexed()
+    const w = wing.toNonIndexed()
+    const pb = b.getAttribute('position').array
+    const pw = w.getAttribute('position').array
+    const pos = new Float32Array(pb.length + pw.length)
+    pos.set(pb, 0)
+    pos.set(pw, pb.length)
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    g.computeVertexNormals()
+    return g
+  })()
+  const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: 0x8a93a3 }), n)
+  mesh.frustumCulled = false
+  const m4 = new THREE.Matrix4()
+  const eu = new THREE.Euler()
+  const q = new THREE.Quaternion()
+  const p = new THREE.Vector3()
+  const one = new THREE.Vector3(1, 1, 1)
+  const update = (dt: number, px: number, pz: number, t: number) => {
+    for (let i = 0; i < n; i++) {
+      const ix = i * 3
+      const hx = base[i * 2], hz = base[i * 2 + 1]
+      if (sc[i] <= 0) {
+        // grounded: hop a hair, flee if the player gets close
+        const ddx = cur[ix] - px, ddz = cur[ix + 2] - pz
+        if (ddx * ddx + ddz * ddz < 5) { sc[i] = 2.2 + Math.random() * 1.8; ph[i] = ddx === 0 && ddz === 0 ? 0 : Math.atan2(ddx, ddz) }
+        else cur[ix + 1] += (0.08 - cur[ix + 1]) * Math.min(1, dt * 6)
+      } else {
+        sc[i] -= dt
+        const orbit = 1.5 + Math.sin(t * 3 + ph[i]) * 0.4
+        const tx = hx + Math.cos(ph[i] + t * 2) * orbit
+        const tz = hz + Math.sin(ph[i] + t * 2) * orbit
+        const ty = sc[i] > 0.6 ? 1.8 + Math.sin(t * 9 + ph[i]) * 0.5 : 0.08
+        const k = Math.min(1, dt * (sc[i] > 0.6 ? 4 : 7))
+        cur[ix] += (tx - cur[ix]) * k
+        cur[ix + 1] += (ty - cur[ix + 1]) * k
+        cur[ix + 2] += (tz - cur[ix + 2]) * k
+      }
+      const flying = sc[i] > 0
+      const flap = flying ? Math.sin(t * 26 + ph[i]) * 0.5 : 0
+      eu.set(flap * 0.6, ph[i] + (flying ? t * 2 : 0), flap * 0.4)
+      q.setFromEuler(eu)
+      one.setScalar(1 + flap * 0.15)
+      mesh.setMatrixAt(i, m4.compose(p.set(cur[ix], cur[ix + 1], cur[ix + 2]), q, one))
+    }
+    mesh.instanceMatrix.needsUpdate = true
+  }
+  update(0, 0, 0, 0)
+  return { mesh, update }
+}
+
 // C9 — ground-floor windows spill warm light onto the pavement when the sun is very low.
 // One instanced quad per window laid flat on the ground, oriented along the facade normal;
 // the shader fades each streak by how sun-facing the wall is, and a global dawn/dusk gate (uGate).

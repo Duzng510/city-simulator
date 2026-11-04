@@ -38,7 +38,7 @@ chạy 60fps; React chỉ nhận `Stats` qua `onStats` (~2.5Hz) và gọi setter
    `applyTier()` (rebuild cả chain), không mutate pass trực tiếp. `tier === 'low'` nghĩa là tắt post.
 2. **Determinism**: `buildCity(tex, 20261102)`, `buildEntities(tex, 5150)`, rng tập trung ở
    `util.ts`. Layout phố/xe/ped **không** dùng `Math.random()` (ambience, timing, camera shake thì được).
-3. **URL contract** `?h,rain,tier,mode,bloom,fx,adaptive`: engine đọc lúc init, `useGame` ghi lại sau
+3. **URL contract** `?h,rain,tier,mode,bloom,rays,fx,adaptive`: engine đọc lúc init, `useGame` ghi lại sau
    500ms bằng `history.replaceState`. Thêm setting mới phải sửa cả hai nơi. `?adaptive=0` tắt auto-tier.
 4. **Perf**: không cấp phát trong `frame()` — tái dùng vector scratch (`camPos`, `hudFx`, `driveFx`,
    `hlTmp`, `dm4`…), không tạo material/geometry mỗi frame. Mục tiêu 60fps ở `medium`.

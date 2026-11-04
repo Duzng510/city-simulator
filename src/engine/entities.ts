@@ -30,15 +30,16 @@ const NB = 3, NV = 5 // 3 bus lines + 2 delivery trucks, all in car slots 0..4
 export interface Entities {
   group: THREE.Group
   update: (dt: number, t: number, hour: number, night: number, rain: number, px: number, pz: number, walking: boolean, pedBoost?: number) => void
-  onHonk: (fn: () => void) => void
+  onHonk: (fn: (x: number, z: number) => void) => void
   tryEnter: (x: number, z: number, maxR: number) => { x: number; z: number; h: number } | null
   drive: (x: number, z: number, h: number, roll?: number, pitch?: number, brake?: number) => void
   park: (x: number, z: number, h: number) => void
   talkNearest: (x: number, z: number, maxR: number) => boolean
   busHorn: () => boolean
-  onMeow: (fn: () => void) => void
+  onMeow: (fn: (x: number, z: number) => void) => void
   pedWorld: () => { px: Float32Array; pz: Float32Array; n: number }
   carWorld: () => { x: Float32Array; z: Float32Array; n: number }
+  carPush: (v: THREE.Vector3) => void
 }
 
 export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], parks: { x: number; z: number }[] = [], alleys: { x: number; z: number; px: number; pz: number; py: number }[] = []) {
@@ -103,8 +104,8 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   const carvar = new Int8Array(CARS)
   for (let k = 0; k < CARS; k++) carvar[k] = k % VC
   let activeN = 0
-  let honkCb = () => {}
-  let meowCb = () => {}
+  let honkCb = (_x: number, _z: number) => {}
+  let meowCb = (_x: number, _z: number) => {}
   let lpx = 0, lpz = 0
   const tint = new THREE.Color()
   const m4 = new THREE.Matrix4()
@@ -296,7 +297,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   peds.frustumCulled = false
   peds.castShadow = true
 
-  const ped = { i: new Int8Array(PEDS), j: new Int8Array(PEDS), u: new Float32Array(PEDS), v: new Float32Array(PEDS), s: new Float32Array(PEDS), pd: new Float32Array(PEDS), ph: new Float32Array(PEDS), pc: new Int8Array(PEDS), idle: new Uint8Array(PEDS), st: new Int8Array(PEDS), cw: new Float32Array(PEDS), cx: new Float32Array(PEDS), px: new Float32Array(PEDS), pz: new Float32Array(PEDS), hd: new Float32Array(PEDS), frz: new Float32Array(PEDS), hi: new Int8Array(PEDS), hj: new Int8Array(PEDS), di: new Int8Array(PEDS), dj: new Int8Array(PEDS), ps: new Uint8Array(PEDS), rest: new Float32Array(PEDS), umbrella: new Uint8Array(PEDS), board: new Uint8Array(PEDS), bt: new Float32Array(PEDS) }
+  const ped = { i: new Int8Array(PEDS), j: new Int8Array(PEDS), u: new Float32Array(PEDS), v: new Float32Array(PEDS), s: new Float32Array(PEDS), pd: new Float32Array(PEDS), ph: new Float32Array(PEDS), pc: new Int8Array(PEDS), idle: new Uint8Array(PEDS), st: new Int8Array(PEDS), cw: new Float32Array(PEDS), cx: new Float32Array(PEDS), px: new Float32Array(PEDS), pz: new Float32Array(PEDS), hd: new Float32Array(PEDS), frz: new Float32Array(PEDS), hi: new Int8Array(PEDS), hj: new Int8Array(PEDS), di: new Int8Array(PEDS), dj: new Int8Array(PEDS), ps: new Uint8Array(PEDS), rest: new Float32Array(PEDS), umbrella: new Uint8Array(PEDS), board: new Uint8Array(PEDS), bt: new Float32Array(PEDS), lk: new Float32Array(PEDS), tk: new Float32Array(PEDS), tp: new Int16Array(PEDS) }
   let pedVisible = PEDS
   // constants for edge positions (CELL - ROAD - 2.8 per side)
   const EDGE = CELL - ROAD - 2.8
@@ -383,7 +384,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   group.add(police)
   const pa = rand() < 0.5 ? 0 : 1, pl = 1 + Math.floor(rand() * (N - 2)), pd = rand() < 0.5 ? -1 : 1
   let pp = (rand() * 2 - 1) * HALF, ph = 0, pSir = 0
-  let sirenCb = () => {}
+  let sirenCb = (_x: number, _z: number) => {}
 
   const tlOff = new Float32Array(N * N), tlPer = new Float32Array(N * N)
   for (let i = 0; i < N * N; i++) { tlOff[i] = rand() * 14; tlPer[i] = 10 + rand() * 6 }
@@ -422,7 +423,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       const a = car.axis[k], d = car.dir[k]
       if (car.arc[k] > 0) {
         // mid-turn: ride a quadratic Bezier through the junction so the lane change never cuts the corner
-        const s = k * 6, u = car.arc[k] = Math.min(1, car.arc[k] + dt / ARC), iu = 1 - u
+        const s = k * 6, prev = car.arc[k], u = Math.min(1, prev + dt / ARC), iu = 1 - u
         const px = iu * iu * car.bx[s] + 2 * iu * u * car.bx[s + 2] + u * u * car.bx[s + 4]
         const pz = iu * iu * car.bx[s + 1] + 2 * iu * u * car.bx[s + 3] + u * u * car.bx[s + 5]
         const vx = 2 * iu * (car.bx[s + 2] - car.bx[s]) + 2 * u * (car.bx[s + 4] - car.bx[s + 2])
@@ -432,9 +433,20 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
         q.setFromAxisAngle(up, car.h[k])
         m4.compose(pos, q, one)
         setCar(k, m4)
-        tint.setRGB(1, 1, 1)
+        // turn signal: blink the light sprite amber ~1.6Hz while the car rides its turn arc
+        if (Math.sin(t * 10 + k) > 0) tint.setRGB(1.3, 0.5, 0.08)
+        else tint.setRGB(1, 1, 1)
         lights.setColorAt(k, tint)
-        if (car.arc[k] >= 1) {
+        // B1: a turning car skipped every yield rule and clipped through traffic and peds —
+        // freeze the turn while a body (or the walking player) sits in the exit
+        let hold = walking && (px - lpx) ** 2 + (pz - lpz) ** 2 < 16
+        for (let j = 0; j < activeN && !hold; j++) {
+          if (j === k || j === driver.k || car.v0[j] === 0) continue
+          if ((car.cx[j] - px) ** 2 + (car.cz[j] - pz) ** 2 < 25) hold = true
+        }
+        if (hold) continue
+        car.arc[k] = u
+        if (u >= 1) {
           car.arc[k] = 0
           car.p[k] = car.axis[k] === 0 ? px : pz
           car.ni[k] = nextNI(car.p[k], car.dir[k])
@@ -464,7 +476,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
             for (let m = 0; m < pedVisible; m++) {
               if (Math.abs(ped.px[m] - bx) > 4 || Math.abs(ped.pz[m] - bz) > 4) continue
               if (r.km === 0 && !ped.board[m]) { ped.board[m] = 1; ped.bt[m] = 6 + rand() * 8 }
-              if (hornCd[ri] <= 0) { honkCb(); hornCd[ri] = 12 }
+              if (hornCd[ri] <= 0) { honkCb(bx, bz); hornCd[ri] = 12 }
             }
             tgt = 0
           } else {
@@ -474,12 +486,21 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
             if (car.dwell[k] > 0) tgt = 0
           }
         }
-        // car ahead in same lane? O(96) — trivial
-        for (let j = 0; j < CARS; j++) {
-          if (j === k || car.v0[j] === 0 || car.arc[j] > 0) continue
-          if (car.axis[j] !== a || car.line[j] !== car.line[k] || car.dir[j] !== d) continue
-          const along = (car.p[j] - car.p[k]) * d
-          if (along > 0 && along < 30) {
+        // B1: what sits ahead of me? lane keys alone miss parked, dwelling and turning cars, so
+        // test world positions (cx/cz are last frame's mesh centres). O(CARS) — trivial
+        const hx = Math.sin(car.h[k]), hz = Math.cos(car.h[k])
+        const lane = line(car.line[k]) + car.off[k]
+        const ox = a === 0 ? car.p[k] : lane, oz = a === 0 ? lane : car.p[k]
+        for (let j = 0; j < activeN; j++) {
+          if (j === k || j === driver.k) continue
+          const dx = car.cx[j] - ox, dz = car.cz[j] - oz
+          const along = dx * hx + dz * hz
+          if (along <= 0 || along > 30) continue
+          const lat = Math.abs(dx * hz - dz * hx)
+          if (Math.sin(car.h[j]) * hx + Math.cos(car.h[j]) * hz < 0.7) {
+            // cross traffic (or a car nose-on) across my path: stop rather than overlap
+            if (lat < 5 && along < 11) tgt = 0
+          } else if (lat < 2.4) {
             // match the leader's own speed inside 30m so a stop ripples backward (jam cascade)
             const safe = Math.max(0, along - 5) / 25 // 0 at 5m gap, 1 at 30m
             tgt = Math.min(tgt, car.v[j] * (0.35 + 0.65 * safe) + car.v0[k] * carF * safe)
@@ -492,6 +513,12 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           for (let m = 0; m < pedVisible; m++) {
             if (Math.abs(ped.px[m] - nx) < 7 && Math.abs(ped.pz[m] - nz) < 7) { tgt = 0; break }
           }
+        }
+        // B1: the walking player is a pedestrian anywhere in the road, not only in a crosswalk
+        if (walking && tgt > 0) {
+          const al = (px - ox) * hx + (pz - oz) * hz
+          if (al > 0 && al < 24 && Math.abs((px - ox) * hz - (pz - oz) * hx) < 2.2)
+            tgt = Math.min(tgt, (car.v0[k] * carF * Math.max(0, al - 4)) / 20)
         }
         car.v[k] += (tgt - car.v[k]) * Math.min(1, dt * 3)
 
@@ -527,6 +554,35 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       let p = car.p[k] + car.v[k] * d * dt
       if (p > lim) { p = -lim; car.ni[k] = nextNI(p, d); car.dec[k] = -1; car.turn[k] = 0 }
       else if (p < -lim) { p = lim; car.ni[k] = nextNI(p, d); car.dec[k] = -1; car.turn[k] = 0 }
+      // B1: hard block — the soft yield above only eases speed, so a car still clips a body or
+      // another car between frames. Test the candidate centre against its oriented box and, if it
+      // would overlap, freeze in place instead of advancing (mesh stays at last frame's spot).
+      {
+        const laneO = l + car.off[k]
+        const nx = a === 0 ? p : laneO, nz = a === 0 ? laneO : p
+        const sx = Math.sin(car.h[k]), sz = Math.cos(car.h[k])
+        const hl = (car.rv[k] ? (rvSpec[car.rv[k] - 1].km ? 3.4 : 5.7) : 2.3) + 1.2
+        const hw = 1.2 + 1.2
+        let blocked = false
+        if (walking) {
+          const dx = px - nx, dz = pz - nz
+          if (Math.abs(dx * sx + dz * sz) < hl && Math.abs(dx * sz - dz * sx) < hw) blocked = true
+        }
+        for (let m = 0; !blocked && m < pedVisible; m++) {
+          const dx = ped.px[m] - nx
+          if (dx > hl || dx < -hl) continue
+          const dz = ped.pz[m] - nz
+          if (Math.abs(dx * sx + dz * sz) < hl && Math.abs(dx * sz - dz * sx) < hw) blocked = true
+        }
+        for (let j = 0; !blocked && j < activeN; j++) {
+          if (j === k || j === driver.k) continue
+          const dx = car.cx[j] - nx
+          if (dx > hl + 2 || dx < -(hl + 2)) continue
+          const dz = car.cz[j] - nz
+          if (Math.abs(dx * sx + dz * sz) < hl && Math.abs(dx * sz - dz * sx) < hw) blocked = true
+        }
+        if (blocked) p = car.p[k]
+      }
       car.p[k] = p
       if (car.rv[k]) {
         const ri = car.rv[k] - 1, km = rvSpec[ri].km, mi = km ? k - NB : k
@@ -561,7 +617,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
         const cx = car.axis[k] === 0 ? car.p[k] : l2, cz = car.axis[k] === 0 ? l2 : car.p[k]
         const blocked = car.v[k] < 1 && (cx - px) ** 2 + (cz - pz) ** 2 < 9
         car.angry[k] = blocked ? car.angry[k] + dt : 0
-        if (car.angry[k] > 2) { honkCb(); car.angry[k] = -6 }
+        if (car.angry[k] > 2) { honkCb(cx, cz); car.angry[k] = -6 }
       }
     }
     for (const m of cvCars) m.instanceMatrix.needsUpdate = true
@@ -603,7 +659,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     blueLt.visible = !flash
     pSir -= dt
     if (pSir <= 0) {
-      if ((pwx - px) ** 2 + (pwz - pz) ** 2 < 3600) { sirenCb(); pSir = 7 }
+      if ((pwx - px) ** 2 + (pwz - pz) ** 2 < 3600) { sirenCb(pwx, pwz); pSir = 7 }
       else pSir = 3
     }
 
@@ -670,7 +726,23 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           } else {
             const pref = Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? 1 : 3) : (dz > 0 ? 2 : 0)
             if (c === pref) { ped.st[k] = 1; ped.cx[k] = c }
-            else ped.pd[k] = 0.4 + rand() * 2
+            else {
+              ped.pd[k] = 0.4 + rand() * 2
+              // D13: hai người gặp nhau ở góc phố — 10% dừng lại nói chuyện 5-10s
+              if (rand() < 0.1) {
+                for (let m = 0; m < pedVisible; m++) {
+                  if (m === k || ped.tk[m] > 0) continue
+                  if ((ped.px[m] - ped.px[k]) ** 2 + (ped.pz[m] - ped.pz[k]) ** 2 < 16) {
+                    const tl = 5 + rand() * 5
+                    ped.tk[k] = tl
+                    ped.tp[k] = m
+                    ped.tk[m] = tl
+                    ped.tp[m] = k
+                    break
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -685,7 +757,8 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
 
       // motion gate: idle frozen, wait holds, cross moves along the crosswalk, else walks
       let vv = ped.v[k]
-      if (stand) vv = 0
+      if (ped.tk[k] > 0) { ped.tk[k] -= dt; vv = 0 }
+      else if (stand) vv = 0
       else if (ped.st[k] === 1) {
         const req = cnx !== 0 ? 1 : 0 // wait until traffic on the crossed axis is stopped
         const g = greenAxis(I, J, t)
@@ -747,9 +820,28 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           ped.cw[k] = 0
         }
       }
-      ped.hd[k] = Math.atan2(fx, fz)
       ped.px[k] = x
       ped.pz[k] = z
+      // D13: world nhận ra player. Cổ quay tối đa 90° so với hướng bước (không ai quay hẳn lưng
+      // đi lùi), và người lại quá gần thì đứng chờ thay vì đi xuyên qua nhau.
+      const wh = Math.atan2(fx, fz)
+      const dxp = px - x
+      const dzp = pz - z
+      const dp2 = dxp * dxp + dzp * dzp
+      let off = ped.lk[k]
+      if (ped.tk[k] > 0) {
+        const pt = ped.tp[k]
+        off = Math.atan2(ped.px[pt] - x, ped.pz[pt] - z) - wh + Math.sin(t * 2.2 + k) * 0.12
+      } else if (dp2 < 36) {
+        const dl = Math.atan2(dxp, dzp) - wh
+        const w = ((dl + Math.PI * 3) % (Math.PI * 2)) - Math.PI
+        off += ((Math.abs(w) < 1.5 ? w : Math.sign(w) * 1.5) - off) * Math.min(1, dt * 3)
+        if (dp2 < 6.25) ped.pd[k] = 0.2
+      } else {
+        off -= off * Math.min(1, dt * 2)
+      }
+      ped.lk[k] = off
+      ped.hd[k] = wh + off
       q.setFromAxisAngle(up, ped.hd[k])
       // y bob: standing = breathing, walker = walk bob (rain cranks stride rate and leans them forward)
       const bob = stand
@@ -821,11 +913,15 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     }
     for (const [m] of wings) m.instanceMatrix.needsUpdate = true
 
-    // fireflies: drift the whole cloud by feeding time to the shader; brighten only well after dusk
-    const ffMat = firefly.material as THREE.ShaderMaterial
-    ffMat.uniforms.t.value = t
-    ffMat.uniforms.bright.value = night > 0.5 ? (night - 0.5) * 2 : 0
-    firefly.visible = night > 0.5
+    // fireflies: drift the whole cloud by feeding time to the shader; brighten only well after dusk.
+    // Street flies want a clearer, calmer summer night than the park ones (C8).
+    parkFlies.mat.uniforms.t.value = t
+    parkFlies.mat.uniforms.bright.value = night > 0.5 ? (night - 0.5) * 2 : 0
+    parkFlies.p.visible = night > 0.5
+    streetFlies.mat.uniforms.t.value = t
+    const streetOn = night > 0.6 && rain < 0.2
+    streetFlies.mat.uniforms.bright.value = streetOn ? (night - 0.6) * 2.5 : 0
+    streetFlies.p.visible = streetOn
 
     // pigeons: perch on the plaza, scatter when you walk under, respawn after a pause
     for (let k = 0; k < NPIG; k++) {
@@ -863,7 +959,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       const c = cat
       const near = Math.hypot(px - c.x[k], pz - c.z[k])
       if (c.st[k] === 0) {
-        if (near < 4) { c.st[k] = 1; c.g[k] = 0; meowCb() }
+        if (near < 4) { c.st[k] = 1; c.g[k] = 0; meowCb(c.x[k], c.z[k]) }
       } else if (c.st[k] === 1) {
         const s = Math.min(1, dt * 6)
         c.x[k] += (c.px[k] - c.x[k]) * s
@@ -960,6 +1056,52 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     lastParkedK = k
     driver.k = -1
   }
+  // B1: cars are solid to the walking player — oriented box per type, because a bus is 11m long
+  // and a circle around its centre lets you stand in half of it
+  const carPush = (v: THREE.Vector3) => {
+    const R = 0.32
+    for (let k = 0; k < activeN; k++) {
+      if (k === driver.k) continue
+      const fx = Math.sin(car.h[k]), fz = Math.cos(car.h[k])
+      const dx = v.x - car.cx[k], dz = v.z - car.cz[k]
+      let along = dx * fx + dz * fz
+      let lat = dx * fz - dz * fx
+      const L = (car.rv[k] ? (rvSpec[car.rv[k] - 1].km ? 3.4 : 5.7) : 2.3) + R
+      const W = 1.2 + R
+      if (Math.abs(along) > L || Math.abs(lat) > W) continue
+      if (L - Math.abs(along) < W - Math.abs(lat)) along = Math.sign(along || 1) * L
+      else lat = Math.sign(lat || 1) * W
+      v.x = car.cx[k] + along * fx + lat * fz
+      v.z = car.cz[k] + along * fz - lat * fx
+    }
+  }
+  // B1: the vehicle the player drives is solid to traffic and pedestrians. Same oriented-box push
+  // as carPush but with the vehicle's own radius, plus a circle pass against peds.
+  const vehPush = (v: THREE.Vector3, R: number) => {
+    for (let k = 0; k < activeN; k++) {
+      if (k === driver.k) continue
+      const fx = Math.sin(car.h[k]), fz = Math.cos(car.h[k])
+      const dx = v.x - car.cx[k], dz = v.z - car.cz[k]
+      let along = dx * fx + dz * fz
+      let lat = dx * fz - dz * fx
+      const L = (car.rv[k] ? (rvSpec[car.rv[k] - 1].km ? 3.4 : 5.7) : 2.3) + R
+      const W = 1.2 + R
+      if (Math.abs(along) > L || Math.abs(lat) > W) continue
+      if (L - Math.abs(along) < W - Math.abs(lat)) along = Math.sign(along || 1) * L
+      else lat = Math.sign(lat || 1) * W
+      v.x = car.cx[k] + along * fx + lat * fz
+      v.z = car.cz[k] + along * fz - lat * fx
+    }
+    const PR = 0.5 + R
+    for (let m = 0; m < pedVisible; m++) {
+      const dx = v.x - ped.px[m], dz = v.z - ped.pz[m]
+      const dd = dx * dx + dz * dz
+      if (dd > PR * PR || dd === 0) continue
+      const d = Math.sqrt(dd)
+      v.x = ped.px[m] + (dx / d) * PR
+      v.z = ped.pz[m] + (dz / d) * PR
+    }
+  }
   const talkNearest = (x: number, z: number, maxR: number) => {
     let best = -1
     let bd = maxR * maxR
@@ -977,14 +1119,15 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   const busHorn = () => {
     let best = -1
     let bd = 36
+    let bx = 0, bz = 0
     for (let k = 0; k < RV; k++) {
       if (car.dwell[k] <= 0) continue
       const s = slotPose(k)
       const dd = (s.x - lpx) ** 2 + (s.z - lpz) ** 2
-      if (dd < bd) { bd = dd; best = k }
+      if (dd < bd) { bd = dd; best = k; bx = s.x; bz = s.z }
     }
     if (best < 0) return false
-    honkCb()
+    honkCb(bx, bz)
     car.dwell[best] = 1.5
     return true
   }
@@ -1038,63 +1181,75 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   const qd = new THREE.Quaternion()
   const rollAxis = new THREE.Vector3(0, 0, 1)
 
-  // ---- fireflies: one additive point cloud drifting around the park trees, only after dusk
-  const NFIRE = 26
-  const fp = new Float32Array(NFIRE * 3)
-  const fphase = new Float32Array(NFIRE)
+  // ---- fireflies: additive point clouds drifting over greenery after dusk (C8). One cloud
+  // hovers the park trees, a wider one the roadside trees; shared shader, separate gate.
+  const ffMat = new THREE.ShaderMaterial({
+    uniforms: { map: { value: tex.glow }, tint: { value: new THREE.Color(0xaeea5a) }, bright: { value: 0 }, t: { value: 0 } },
+    vertexShader: `
+      attribute float phase;
+      uniform float t;
+      varying float vA;
+      void main() {
+        vec3 p = position;
+        p.x += sin(t * 0.6 + phase) * 0.6;
+        p.y += sin(t * 0.9 + phase * 1.7) * 0.35;
+        p.z += cos(t * 0.5 + phase) * 0.6;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        float d = max(0.001, -mv.z);
+        float tw = 0.5 + 0.5 * sin(t * 2.5 + phase * 4.0);
+        gl_PointSize = clamp(120.0 / d, 2.0, 16.0) * (0.6 + 0.4 * tw);
+        vA = tw * smoothstep(180.0, 8.0, d);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform sampler2D map;
+      uniform vec3 tint;
+      uniform float bright;
+      varying float vA;
+      void main() {
+        float a = texture2D(map, gl_PointCoord).a * vA * bright;
+        gl_FragColor = vec4(tint * a, a);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  })
   const frnd = rng(seed + 7331)
-  for (let k = 0; k < NFIRE; k++) {
-    const home = parks[k % parks.length]
-    const a = frnd() * Math.PI * 2
-    const r = 2 + frnd() * 8
-    fp[k * 3] = home.x + Math.cos(a) * r
-    fp[k * 3 + 1] = 0.7 + frnd() * 1.8
-    fp[k * 3 + 2] = home.z + Math.sin(a) * r
-    fphase[k] = frnd() * Math.PI * 2
+  const mkFlies = (homes: { x: number; z: number }[], n: number) => {
+    const fp = new Float32Array(n * 3)
+    const fphase = new Float32Array(n)
+    for (let k = 0; k < n; k++) {
+      const home = homes[k % homes.length]
+      const a = frnd() * Math.PI * 2
+      const r = 2 + frnd() * 8
+      fp[k * 3] = home.x + Math.cos(a) * r
+      fp[k * 3 + 1] = 0.7 + frnd() * 1.8
+      fp[k * 3 + 2] = home.z + Math.sin(a) * r
+      fphase[k] = frnd() * Math.PI * 2
+    }
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(fp, 3))
+    g.setAttribute('phase', new THREE.BufferAttribute(fphase, 1))
+    const mat = ffMat.clone()
+    const p = new THREE.Points(g, mat)
+    p.frustumCulled = false
+    p.renderOrder = 6
+    p.visible = false
+    group.add(p)
+    return { p, mat }
   }
-  const firefly = new THREE.Points(
-    (() => {
-      const g = new THREE.BufferGeometry()
-      g.setAttribute('position', new THREE.BufferAttribute(fp, 3))
-      g.setAttribute('phase', new THREE.BufferAttribute(fphase, 1))
-      return g
-    })(),
-    new THREE.ShaderMaterial({
-      uniforms: { map: { value: tex.glow }, tint: { value: new THREE.Color(0xaeea5a) }, bright: { value: 0 }, t: { value: 0 } },
-      vertexShader: `
-        attribute float phase;
-        uniform float t;
-        varying float vA;
-        void main() {
-          vec3 p = position;
-          p.x += sin(t * 0.6 + phase) * 0.6;
-          p.y += sin(t * 0.9 + phase * 1.7) * 0.35;
-          p.z += cos(t * 0.5 + phase) * 0.6;
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          float d = max(0.001, -mv.z);
-          float tw = 0.5 + 0.5 * sin(t * 2.5 + phase * 4.0);
-          gl_PointSize = clamp(120.0 / d, 2.0, 16.0) * (0.6 + 0.4 * tw);
-          vA = tw * smoothstep(180.0, 8.0, d);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: `
-        uniform sampler2D map;
-        uniform vec3 tint;
-        uniform float bright;
-        varying float vA;
-        void main() {
-          float a = texture2D(map, gl_PointCoord).a * vA * bright;
-          gl_FragColor = vec4(tint * a, a);
-        }`,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    }),
-  )
-  firefly.frustumCulled = false
-  firefly.renderOrder = 6
-  firefly.visible = false
-  group.add(firefly)
+  // roadside trees sit at the four corners of every block — reuse that grid for street fireflies
+  const streetHomes: { x: number; z: number }[] = []
+  for (let i = 0; i < N - 1; i++)
+    for (let j = 0; j < N - 1; j++)
+      for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as const)
+        if (frnd() < 0.45)
+          streetHomes.push({
+            x: dx > 0 ? line(i) + ROAD / 2 + 2.2 : line(i + 1) - ROAD / 2 - 2.2,
+            z: dz > 0 ? line(j) + ROAD / 2 + 2.2 : line(j + 1) - ROAD / 2 - 2.2,
+          })
+  const parkFlies = mkFlies(parks.length ? parks : [{ x: 0, z: 0 }], 26)
+  const streetFlies = mkFlies(streetHomes.length ? streetHomes : [{ x: 0, z: 0 }], 30)
 
   // ---- pigeons: a few ground birds on the plaza that scatter when you approach
   const NPIG = 7
@@ -1171,5 +1326,5 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   group.add(eyes)
 
   update(0, 0, 12, 0, 0, 0, 0, false)
-  return { group, update, tryEnter, drive, park, headlights, talkNearest, busHorn, onHonk: (fn: () => void) => { honkCb = fn }, onMeow: (fn: () => void) => { meowCb = fn }, onSiren: (fn: () => void) => { sirenCb = fn }, pedWorld: () => ({ px: ped.px, pz: ped.pz, n: pedVisible }), carWorld: () => ({ x: car.cx, z: car.cz, n: activeN }) }
+  return { group, update, tryEnter, drive, park, headlights, talkNearest, busHorn, onHonk: (fn: (x: number, z: number) => void) => { honkCb = fn }, onMeow: (fn: (x: number, z: number) => void) => { meowCb = fn }, onSiren: (fn: (x: number, z: number) => void) => { sirenCb = fn }, pedWorld: () => ({ px: ped.px, pz: ped.pz, n: pedVisible }), carWorld: () => ({ x: car.cx, z: car.cz, n: activeN }), carPush, vehPush }
 }

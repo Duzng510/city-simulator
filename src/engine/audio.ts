@@ -15,6 +15,11 @@ export function makeAmbient() {
   let acG: GainNode | null = null
   let drillG: GainNode | null = null
   let master: GainNode | null = null
+  let convOpen: ConvolverNode | null = null
+  let convAlley: ConvolverNode | null = null
+  let openSend: GainNode | null = null
+  let alleySend: GainNode | null = null
+  let buskerPan: PannerNode | null = null
   let vol = 0.5
   let guitarG: GainNode | null = null
   let buskerDetune = 1
@@ -39,6 +44,42 @@ export function makeAmbient() {
     return s
   }
 
+  // exponentially-decaying stereo noise = cheap procedural impulse response for convolution reverb
+  function makeIR(ctx: AudioContext, dur: number, decay: number) {
+    const len = Math.max(1, Math.floor(ctx.sampleRate * dur))
+    const b = ctx.createBuffer(2, len, ctx.sampleRate)
+    for (let c = 0; c < 2; c++) {
+      const d = b.getChannelData(c)
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay)
+    }
+    return b
+  }
+
+  // C10 spatial foundation: HRTF panner per positional one-shot; feeds master + both reverb sends
+  function spatial(x: number, y: number, z: number) {
+    if (!ctx || !master || !convOpen || !convAlley) return null
+    const p = ctx.createPanner()
+    p.panningModel = 'HRTF'
+    p.distanceModel = 'inverse'
+    p.refDistance = 3
+    p.maxDistance = 400
+    p.rolloffFactor = 1.1
+    p.positionX.value = x
+    p.positionY.value = y
+    p.positionZ.value = z
+    p.connect(master)
+    p.connect(convOpen)
+    p.connect(convAlley)
+    return p
+  }
+
+  // destination for a one-shot: HRTF panner when caller gave a world position, else centred on the listener
+  function dest(x?: number, z?: number) {
+    if (!master) return null
+    if (x === undefined || z === undefined) return master
+    return spatial(x, 1.2, z) ?? master
+  }
+
   function build() {
     if (ctx) return
     ctx = new AudioContext()
@@ -46,6 +87,20 @@ export function makeAmbient() {
     master = ctx.createGain()
     master.gain.value = vol
     master.connect(ctx.destination)
+
+    // C10 reverb buses — long open tail for the street, short bright slap for alleys; both fed from panners only
+    convOpen = ctx.createConvolver()
+    convOpen.buffer = makeIR(ctx, 2.6, 2)
+    openSend = ctx.createGain()
+    openSend.gain.value = 0.12
+    convOpen.connect(openSend)
+    openSend.connect(master)
+    convAlley = ctx.createConvolver()
+    convAlley.buffer = makeIR(ctx, 0.55, 4)
+    alleySend = ctx.createGain()
+    alleySend.gain.value = 0
+    convAlley.connect(alleySend)
+    alleySend.connect(master)
 
     // day: low rumble with a slow swell, like distant traffic
     const lp = ctx.createBiquadFilter()
@@ -173,7 +228,8 @@ export function makeAmbient() {
     // busker: procedural acoustic loop, a Karplus-Strong string plucked on a slow pattern; audible only near the plaza at night
     guitarG = ctx.createGain()
     guitarG.gain.value = 0
-    guitarG.connect(master)
+    buskerPan = spatial(0, 1.2, 0)
+    guitarG.connect(buskerPan ?? master)
     const gnotes = [110, 164.8, 220, 261.6, 220, 164.8, 196, 146.8]
     let gni = 0
     setInterval(() => {
@@ -315,8 +371,10 @@ export function makeAmbient() {
     }
   }
 
-  function horn() {
-    if (!ctx || !master) return
+  function horn(x?: number, z?: number) {
+    if (!ctx) return
+    const d = dest(x, z)
+    if (!d) return
     const t = ctx.currentTime
     for (const f of [400, 500]) {
       const osc = ctx.createOscillator()
@@ -325,7 +383,7 @@ export function makeAmbient() {
       osc.frequency.value = f
       gain.gain.setValueAtTime(0.04, t)
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.4)
-      osc.connect(gain).connect(master)
+      osc.connect(gain).connect(d)
       osc.start(t)
       osc.stop(t + 0.4)
     }
@@ -358,8 +416,10 @@ export function makeAmbient() {
   }
 
   // soda drop into the tray of a vending machine: metallic clack over a low thunk
-  function clunk() {
-    if (!ctx || !master) return
+  function clunk(x?: number, z?: number) {
+    if (!ctx) return
+    const d = dest(x, z)
+    if (!d) return
     const t = ctx.currentTime
     const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.08), ctx.sampleRate)
     const nd = nb.getChannelData(0)
@@ -372,7 +432,7 @@ export function makeAmbient() {
     const g1 = ctx.createGain()
     g1.gain.setValueAtTime(0.22, t)
     g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.08)
-    src.connect(hp).connect(g1).connect(master)
+    src.connect(hp).connect(g1).connect(d)
     src.start(t)
     src.stop(t + 0.1)
     const o = ctx.createOscillator()
@@ -382,14 +442,16 @@ export function makeAmbient() {
     const g2 = ctx.createGain()
     g2.gain.setValueAtTime(0.18, t)
     g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.14)
-    o.connect(g2).connect(master)
+    o.connect(g2).connect(d)
     o.start(t)
     o.stop(t + 0.15)
   }
 
   // street food cart: a sputtering bandpassed noise burst ~2kHz, like batter hitting a hot pan
-  function sizzle() {
-    if (!ctx || !master) return
+  function sizzle(x?: number, z?: number) {
+    if (!ctx) return
+    const d = dest(x, z)
+    if (!d) return
     const t = ctx.currentTime
     const dur = 0.8
     const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate)
@@ -413,7 +475,7 @@ export function makeAmbient() {
     chopAmt.gain.value = 0.05
     chop.connect(chopAmt)
     chopAmt.connect(g.gain)
-    s.connect(bp).connect(g).connect(master)
+    s.connect(bp).connect(g).connect(d)
     s.start(t)
     s.stop(t + dur)
     chop.start(t)
@@ -421,8 +483,10 @@ export function makeAmbient() {
   }
 
   // alley cat: a formant-ish mew — sawtooth that pitches up then down under a lowpass
-  function meow() {
-    if (!ctx || !master) return
+  function meow(x?: number, z?: number) {
+    if (!ctx) return
+    const d = dest(x, z)
+    if (!d) return
     const t = ctx.currentTime
     const o = ctx.createOscillator()
     o.type = 'sawtooth'
@@ -436,14 +500,16 @@ export function makeAmbient() {
     g.gain.setValueAtTime(0.0001, t)
     g.gain.exponentialRampToValueAtTime(0.13, t + 0.08)
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55)
-    o.connect(lp).connect(g).connect(master)
+    o.connect(lp).connect(g).connect(d)
     o.start(t)
     o.stop(t + 0.6)
   }
 
   // D3 rare night siren: a lowpassed wail fading in and out over ~5s
-  function siren() {
-    if (!ctx || !master) return
+  function siren(x?: number, z?: number) {
+    if (!ctx) return
+    const d = dest(x, z)
+    if (!d) return
     const t = ctx.currentTime
     const dur = 5
     const osc = ctx.createOscillator()
@@ -463,11 +529,47 @@ export function makeAmbient() {
     g.gain.linearRampToValueAtTime(0.04, t + 1)
     g.gain.setValueAtTime(0.04, t + dur - 1.5)
     g.gain.linearRampToValueAtTime(0.0001, t + dur)
-    osc.connect(lp).connect(g).connect(master)
+    osc.connect(lp).connect(g).connect(d)
     osc.start(t)
     osc.stop(t + dur)
     wob.start(t)
     wob.stop(t + dur)
+  }
+
+  // D9 thunderclap: a long lowpassed noise rumble that sags from ~300Hz to ~50Hz; `power` 1=near 0=far
+  function thunder(delay = 0, power = 1) {
+    if (!ctx || !master) return
+    const t = ctx.currentTime + Math.max(0, delay)
+    const dur = 2.6
+    const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate)
+    const nd = nb.getChannelData(0)
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
+    const s = ctx.createBufferSource()
+    s.buffer = nb
+    const lp = ctx.createBiquadFilter()
+    lp.type = 'lowpass'
+    lp.frequency.setValueAtTime(320, t)
+    lp.frequency.exponentialRampToValueAtTime(55, t + dur)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0, t)
+    g.gain.linearRampToValueAtTime(0.5 * power, t + 0.08)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    s.connect(lp).connect(g).connect(master)
+    s.start(t)
+    s.stop(t + dur)
+    // a near strike gets a sub-bass chest-thump under the rumble
+    if (power > 0.6) {
+      const o = ctx.createOscillator()
+      o.type = 'sine'
+      o.frequency.setValueAtTime(58, t)
+      o.frequency.exponentialRampToValueAtTime(30, t + 0.9)
+      const og = ctx.createGain()
+      og.gain.setValueAtTime(0.3 * power, t)
+      og.gain.exponentialRampToValueAtTime(0.0001, t + 1.1)
+      o.connect(og).connect(master)
+      o.start(t)
+      o.stop(t + 1.15)
+    }
   }
 
   return {
@@ -508,9 +610,35 @@ export function makeAmbient() {
       marketG.gain.setTargetAtTime(0.35 * market, t, 0.6)
       plazaG.gain.setTargetAtTime(0.5 * plaza, t, 0.6)
     },
-    setBusker(level: number) {
+    setBusker(level: number, x?: number, z?: number) {
       if (!ctx || !guitarG) return
       guitarG.gain.setTargetAtTime(clamp(level, 0, 1) * 0.5, ctx.currentTime, 0.5)
+      if (buskerPan && x !== undefined && z !== undefined) {
+        buskerPan.positionX.value = x
+        buskerPan.positionZ.value = z
+      }
+    },
+    // C10 listener orientation from camera each frame; setValueAtTime keeps HRTF interpolation smooth
+    setListener(x: number, y: number, z: number, fx: number, fy: number, fz: number) {
+      if (!ctx) return
+      const l = ctx.listener
+      const t = ctx.currentTime
+      if (l.positionX) {
+        l.positionX.setValueAtTime(x, t); l.positionY.setValueAtTime(y, t); l.positionZ.setValueAtTime(z, t)
+        l.forwardX.setValueAtTime(fx, t); l.forwardY.setValueAtTime(fy, t); l.forwardZ.setValueAtTime(fz, t)
+        l.upX.setValueAtTime(0, t); l.upY.setValueAtTime(1, t); l.upZ.setValueAtTime(0, t)
+      } else {
+        // Safari still only exposes the deprecated setPosition/setOrientation pair
+        l.setPosition(x, y, z)
+        l.setOrientation(fx, fy, fz, 0, 1, 0)
+      }
+    },
+    // wet-mix per zone: street tail is always on, alley slap rises only near alleySpots; zero both for shop interiors
+    setReverb(open: number, alley: number) {
+      if (!ctx || !openSend || !alleySend) return
+      const t = ctx.currentTime
+      openSend.gain.setTargetAtTime(open, t, 0.4)
+      alleySend.gain.setTargetAtTime(alley, t, 0.4)
     },
     tipBusker() {
       buskerDetune *= 1.05
@@ -521,6 +649,7 @@ export function makeAmbient() {
     dogBark,
     horn,
     siren,
+    thunder,
     clunk,
     sizzle,
     meow,

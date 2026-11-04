@@ -6,17 +6,18 @@ export function useGame(onLine?: (t: string) => void) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engRef = useRef<Eng | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
-  const [tier, setTier] = useState<Tier>(() => (new URLSearchParams(location.search).get('tier') as Tier) || 'medium')
+  const [tier, setTier] = useState<Tier>(() => (new URLSearchParams(location.search).get('tier') as Tier) || 'low')
   const [mode, setMode] = useState<Mode>('player')
   const [hour, setHour] = useState(19.4)
   const [scale, setScale] = useState(240)
   const [bloom, setBloom] = useState(1)
+  const [rays, setRays] = useState(1)
   const [motion, setMotion] = useState(0)
   const [ca, setCa] = useState(0)
   const [rain, setRain] = useState(() => Number(new URLSearchParams(location.search).get('rain')) || 0)
   const [ambient, setAmbient] = useState(0.5)
   const [paused, setPaused] = useState(false)
-  const [effects, setEffects] = useState<Effects>({ shadows: true, ao: true, bloom: true, grain: true, grade: true })
+  const [effects, setEffects] = useState<Effects>({ shadows: true, ao: true, bloom: true, rays: true, grain: true, grade: true })
 
   useEffect(() => {
     const eng = createEngine(
@@ -48,15 +49,16 @@ export function useGame(onLine?: (t: string) => void) {
       const q = new URLSearchParams()
       q.set('h', s.h.toFixed(2))
       if (s.rain > 0.01) q.set('rain', s.rain.toFixed(2))
-      if (s.tier !== 'medium') q.set('tier', s.tier)
+      if (s.tier !== 'low') q.set('tier', s.tier)
       if (s.mode !== 'player') q.set('mode', s.mode)
       if (s.bloom !== 1) q.set('bloom', s.bloom.toFixed(2))
+      if (s.rays !== 1) q.set('rays', s.rays.toFixed(2))
       const fxOff = (Object.keys(s.effects) as (keyof Effects)[]).filter((k) => !s.effects[k])
       if (fxOff.length) q.set('fx', fxOff.join(','))
       history.replaceState(null, '', `?${q.toString()}`)
     }, 500)
     return () => clearTimeout(t)
-  }, [hour, rain, tier, mode, bloom, effects, paused])
+  }, [hour, rain, tier, mode, bloom, rays, effects, paused])
 
   const eng = () => engRef.current
 
@@ -64,6 +66,7 @@ export function useGame(onLine?: (t: string) => void) {
     hour: (v: number) => { setHour(v); eng()?.setTime(v) },
     tier: (v: Tier) => { setTier(v); eng()?.setTier(v) },
     bloom: (v: number) => { setBloom(v); eng()?.setBloom(v) },
+    rays: (v: number) => { setRays(v); eng()?.setRays(v) },
     motion: (v: number) => { setMotion(v); eng()?.setMotion(v) },
     ca: (v: number) => { setCa(v); eng()?.setCA(v) },
     rain: (v: number) => { setRain(v); eng()?.setRain(v) },
@@ -86,5 +89,5 @@ export function useGame(onLine?: (t: string) => void) {
     e?.start()
   }
 
-  return { canvasRef, eng, stats, tier, mode, hour, scale, bloom, motion, ca, rain, ambient, paused, effects, setAll, toggleFx, togglePause, startEngine }
+  return { canvasRef, eng, stats, tier, mode, hour, scale, bloom, rays, motion, ca, rain, ambient, paused, effects, setAll, toggleFx, togglePause, startEngine }
 }

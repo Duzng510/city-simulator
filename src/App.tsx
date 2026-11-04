@@ -18,7 +18,7 @@ const timeLabel = (h: number) => {
   return 'Buổi tối'
 }
 
-const FX_LABELS: Record<keyof Effects, string> = { shadows: 'Bóng đổ', ao: 'AO', bloom: 'Bloom', grain: 'Hạt phim', grade: 'Màu' }
+const FX_LABELS: Record<keyof Effects, string> = { shadows: 'Bóng đổ', ao: 'AO', bloom: 'Bloom', rays: 'Tia sáng', grain: 'Hạt phim', grade: 'Màu' }
 
 const SHOTS = 'cs.shots'
 const loadShots = () => {
@@ -53,7 +53,7 @@ export default function App() {
   const [gallery, setGallery] = useState(false)
   const [tut, setTut] = useState(0)
 
-  const { canvasRef, eng, stats, tier, mode, hour, scale, bloom, motion, ca, rain, ambient, paused, effects, setAll, toggleFx, togglePause, startEngine } =
+  const { canvasRef, eng, stats, tier, mode, hour, scale, bloom, rays, motion, ca, rain, ambient, paused, effects, setAll, toggleFx, togglePause, startEngine } =
     useGame((t) => setLine((p) => ({ t, n: (p?.n ?? 0) + 1 })))
 
   useEffect(() => {
@@ -156,6 +156,7 @@ export default function App() {
     { v: 'medium', label: 'Trung bình' },
     { v: 'high', label: 'Cao' },
     { v: 'ultra', label: 'Rất cao' },
+    { v: 'max', label: 'Tối đa' },
   ]
 
   const PRESETS = {
@@ -192,6 +193,7 @@ export default function App() {
           <option value="medium">Trung bình — AO nhẹ + bloom</option>
           <option value="high">Cao — 2048 bóng, AO rõ</option>
           <option value="ultra">Rất cao — 4096 bóng, ratio 1.6</option>
+          <option value="max">Tối đa — 8192 bóng, ratio 2.0</option>
         </select>
       </label>
 
@@ -236,6 +238,8 @@ export default function App() {
       </Slider>
 
       <Slider label={`Độ rực đèn (bloom) ${(bloom * 100).toFixed(0)}%`} value={bloom} min={0} max={2} step={0.05} onChange={setAll.bloom} />
+
+      <Slider label={`Tia sáng trong không khí ${(rays * 100).toFixed(0)}%`} value={rays} min={0} max={2} step={0.05} onChange={setAll.rays} />
 
       <Slider label={`Nhòe chuyển động ${(motion * 100).toFixed(0)}%`} value={motion} min={0} max={1} step={0.05} onChange={setAll.motion} />
 
@@ -310,13 +314,13 @@ export default function App() {
 
       <div className={`absolute inset-0 transition-opacity duration-200 ${photo || !started ? 'pointer-events-none opacity-0' : 'opacity-100'}`}>
 
-      {IS_TOUCH && <TouchControls eng={eng} mode={mode} />}
+      {IS_TOUCH && <TouchControls eng={eng} mode={mode} photo={photo} />}
 
       <MiniMap eng={eng} />
       <Compass eng={eng} />
       <PoiMarkers eng={eng} />
 
-      <div className={`absolute ${IS_TOUCH ? 'left-3 top-[max(0.75rem,env(safe-area-inset-top))] p-2' : 'left-4 top-4 w-52 p-3'} ${panel}`}>
+      <div className={`absolute ${IS_TOUCH ? 'left-3 top-[max(3.5rem,calc(env(safe-area-inset-top)+2.75rem))] p-2' : 'left-4 top-4 w-52 p-3'} ${panel}`}>
         {IS_TOUCH ? (
           <span className="tabular-nums text-slate-100">{stats ? `${stats.fps.toFixed(0)} FPS` : '--'} · {fmtHour(hour)}</span>
         ) : (
@@ -353,7 +357,7 @@ export default function App() {
           )}
         </>
       ) : (
-        <div className={`absolute right-4 top-4 w-56 space-y-3 p-3 ${panel}`}>{settings}</div>
+        <div className={`absolute right-4 top-4 max-h-[calc(100vh-2rem)] w-56 space-y-3 overflow-y-auto p-3 ${panel}`}>{settings}</div>
       )}
 
       {line && (
@@ -390,8 +394,17 @@ export default function App() {
         </div>
       )}
 
+      {IS_TOUCH && started && !photo && !sheet && !gallery && (
+        <button
+          className={`absolute bottom-[max(5rem,calc(env(safe-area-inset-bottom)+3.75rem))] right-3 rounded-full border border-white/15 bg-black/55 px-5 py-3 text-[12px] font-medium text-slate-100 backdrop-blur`}
+          onClick={() => setPhoto(true)}
+        >
+          📷 Chụp
+        </button>
+      )}
+
       {photo && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2">
+        <div className="absolute bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 flex max-w-[94vw] -translate-x-1/2 flex-wrap justify-center gap-2">
           <button
             className="rounded-md bg-sky-400/90 px-4 py-2 text-xs font-medium text-slate-950"
             onClick={async () => {
@@ -424,7 +437,7 @@ export default function App() {
           {(Object.keys(FILTERS) as Filter[]).map((f) => (
             <button
               key={f}
-              className={`rounded-md px-3 py-2 text-xs font-medium ${filter === f ? 'bg-sky-400/90 text-slate-950' : 'bg-white/10 text-white'}`}
+              className={`rounded-md px-3 ${PAD} text-xs font-medium ${filter === f ? 'bg-sky-400/90 text-slate-950' : 'bg-white/10 text-white'}`}
               onClick={() => {
                 setFilter(f)
                 eng()?.setFilter(f)
@@ -443,7 +456,7 @@ export default function App() {
       )}
 
       {gallery && (
-        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/85 p-5 backdrop-blur-sm">
+        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/85 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] backdrop-blur-sm">
           <div className="mb-4 flex items-center justify-between">
             <span className="text-[13px] font-semibold text-white">THƯ VIỆN ẢNH · {shots.length}/12</span>
             <div className="flex gap-2">

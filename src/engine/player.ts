@@ -33,6 +33,9 @@ export function makePlayer(spawn: THREE.Vector3): Player {
   const target = new THREE.Vector3()
   const leadV = new THREE.Vector3()
   const ray = new THREE.Raycaster()
+  let travelled = 0
+  let clock = 0
+  let lean = 0
 
   const self: Player = {
     root,
@@ -59,6 +62,7 @@ export function makePlayer(spawn: THREE.Vector3): Player {
       city.hit(pos, 0.32)
       pos.y = 0
       self.speed = Math.hypot(vel.x, vel.z)
+      if (dt > 0) { clock += dt; travelled += self.speed * dt }
       if (self.speed > 0.3) {
         root.quaternion.setFromAxisAngle(yUp, Math.atan2(vel.x, vel.z))
       }
@@ -81,7 +85,20 @@ export function makePlayer(spawn: THREE.Vector3): Player {
       const d = hits.length ? Math.max(1.2, hits[0].distance - 0.3) : self.dist
       camera.position.copy(target).addScaledVector(fwd, -d)
       if (camera.position.y < 0.6) camera.position.y = 0.6
+      if (dt > 0) {
+        const norm = clamp(self.speed / 2.9, 0, 1)
+        // 0.45m per bob = two beats per the 0.9m stride in character.ts, so camera lands on each footfall
+        const ph = (travelled / 0.45) * Math.PI
+        right.crossVectors(fwd, yUp).normalize()
+        lean += ((vel.dot(right) / 6.4) * 0.05 - lean) * (1 - Math.exp(-7 * dt))
+        const offY = Math.sin(ph) * 0.028 * norm + Math.sin(clock * 1.2) * 0.008 * (1 - norm)
+        const offX = Math.cos(ph * 0.5) * 0.02 * norm + Math.cos(clock * 0.8) * 0.005 * (1 - norm) - lean * 0.6
+        dir.copy(yUp).applyAxisAngle(fwd, -lean)
+        camera.position.addScaledVector(right, offX).addScaledVector(dir, offY)
+        camera.up.copy(dir)
+      }
       camera.lookAt(target)
+      camera.up.copy(yUp)
       if (dt > 0) {
         const s = self.speed
         const shake = clamp((s - 5) / 15, 0, 1) * 0.08

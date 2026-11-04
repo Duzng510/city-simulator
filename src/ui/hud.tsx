@@ -108,7 +108,7 @@ export function Compass({ eng }: { eng: () => Eng | null }) {
     return () => cancelAnimationFrame(raf)
   }, [])
   return (
-    <div ref={ref} className="pointer-events-none absolute left-1/2 top-[max(0.5rem,env(safe-area-inset-top))] h-5 w-52 -translate-x-1/2 overflow-hidden rounded-md bg-black/45 text-[10px] font-semibold tracking-wide text-slate-100 backdrop-blur-sm">
+    <div ref={ref} className="pointer-events-none absolute left-1/2 top-[max(0.5rem,env(safe-area-inset-top))] h-5 w-44 -translate-x-1/2 overflow-hidden rounded-md bg-black/45 text-[10px] font-semibold tracking-wide text-slate-100 backdrop-blur-sm">
       {BEARINGS.map((l) => (
         <span key={l} className="absolute -translate-x-1/2 tabular-nums">{l}</span>
       ))}
@@ -158,7 +158,7 @@ export function PoiMarkers({ eng }: { eng: () => Eng | null }) {
   )
 }
 
-export function TouchControls({ eng, mode }: { eng: () => Eng | null; mode: Mode }) {
+export function TouchControls({ eng, mode, photo }: { eng: () => Eng | null; mode: Mode; photo: boolean }) {
   const [knob, setKnob] = useState<{ bx: number; by: number; kx: number; ky: number } | null>(null)
   const [running, setRunning] = useState(false)
   const joy = useRef<{ id: number; bx: number; by: number } | null>(null)
@@ -235,7 +235,7 @@ export function TouchControls({ eng, mode }: { eng: () => Eng | null; mode: Mode
         {running ? '🏃 đang chạy' : '🚶 đang đi'} · chạm kép để đổi
       </div>
       <button
-        className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 rounded-full border border-white/15 bg-black/55 px-5 py-3 text-[12px] font-medium text-slate-100 backdrop-blur"
+        className={`absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 rounded-full border border-white/15 bg-black/55 px-5 py-3 text-[12px] font-medium text-slate-100 backdrop-blur ${photo ? 'pointer-events-none opacity-0' : ''}`}
         onClick={() => eng()?.setMode(mode === 'player' ? 'observe' : 'player')}
       >
         {mode === 'player' ? '👁 Quan sát' : '🚶 Điều khiển'}
