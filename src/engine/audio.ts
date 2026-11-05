@@ -21,8 +21,12 @@ export function makeAmbient() {
   let alleySend: GainNode | null = null
   let buskerPan: PannerNode | null = null
   let vol = 0.5
+  // E11 per-category volume trims (0..1, relative to master). Persistent loops read these every
+  // frame via their setters; one-shots read them at call time — so setVolumes needs no re-apply.
+  const cat = { ambience: 1, vehicles: 1, weather: 1, interaction: 1, footsteps: 1 }
   let guitarG: GainNode | null = null
   let buskerDetune = 1
+  let buskerTimer = 0
 
   function noise(ctx: AudioContext) {
     const b = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate)
@@ -232,7 +236,7 @@ export function makeAmbient() {
     guitarG.connect(buskerPan ?? master)
     const gnotes = [110, 164.8, 220, 261.6, 220, 164.8, 196, 146.8]
     let gni = 0
-    setInterval(() => {
+    buskerTimer = setInterval(() => {
       if ((guitarG?.gain.value ?? 0) > 0.01) pluck(gnotes[gni++ % gnotes.length] * buskerDetune)
     }, 600)
 
@@ -327,7 +331,7 @@ export function makeAmbient() {
     filt.type = 'lowpass'
     filt.frequency.value = wet ? 1400 : 600
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(wet ? 0.08 : 0.12, t)
+    gain.gain.setValueAtTime((wet ? 0.08 : 0.12) * cat.footsteps, t)
     gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.11)
     src.connect(filt).connect(gain).connect(master)
     src.start(t)
@@ -347,7 +351,7 @@ export function makeAmbient() {
     filt.type = 'lowpass'
     filt.frequency.value = 400
     gain.gain.setValueAtTime(0, t)
-    gain.gain.linearRampToValueAtTime(0.03, t + 0.3)
+    gain.gain.linearRampToValueAtTime(0.03 * cat.vehicles, t + 0.3)
     gain.gain.exponentialRampToValueAtTime(0.001, t + 2.5)
     osc.connect(filt).connect(gain).connect(master)
     osc.start(t)
@@ -363,7 +367,7 @@ export function makeAmbient() {
       osc.type = 'square'
       osc.frequency.setValueAtTime(280, t + i * 0.18)
       osc.frequency.exponentialRampToValueAtTime(180, t + i * 0.18 + 0.12)
-      gain.gain.setValueAtTime(0.015, t + i * 0.18)
+      gain.gain.setValueAtTime(0.015 * cat.ambience, t + i * 0.18)
       gain.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.18 + 0.14)
       osc.connect(gain).connect(master)
       osc.start(t + i * 0.18)
@@ -381,7 +385,7 @@ export function makeAmbient() {
       const gain = ctx.createGain()
       osc.type = 'sawtooth'
       osc.frequency.value = f
-      gain.gain.setValueAtTime(0.04, t)
+      gain.gain.setValueAtTime(0.04 * cat.vehicles, t)
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.4)
       osc.connect(gain).connect(d)
       osc.start(t)
@@ -430,7 +434,7 @@ export function makeAmbient() {
     hp.type = 'highpass'
     hp.frequency.value = 1200
     const g1 = ctx.createGain()
-    g1.gain.setValueAtTime(0.22, t)
+    g1.gain.setValueAtTime(0.22 * cat.interaction, t)
     g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.08)
     src.connect(hp).connect(g1).connect(d)
     src.start(t)
@@ -440,7 +444,7 @@ export function makeAmbient() {
     o.frequency.setValueAtTime(180, t)
     o.frequency.exponentialRampToValueAtTime(70, t + 0.12)
     const g2 = ctx.createGain()
-    g2.gain.setValueAtTime(0.18, t)
+    g2.gain.setValueAtTime(0.18 * cat.interaction, t)
     g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.14)
     o.connect(g2).connect(d)
     o.start(t)
@@ -454,6 +458,7 @@ export function makeAmbient() {
     if (!d) return
     const t = ctx.currentTime
     const dur = 0.8
+    const iv = cat.interaction
     const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate)
     const nd = nb.getChannelData(0)
     for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1)
@@ -465,8 +470,8 @@ export function makeAmbient() {
     bp.Q.value = 0.8
     const g = ctx.createGain()
     g.gain.setValueAtTime(0, t)
-    g.gain.linearRampToValueAtTime(0.12, t + 0.05)
-    g.gain.setValueAtTime(0.12, t + dur - 0.15)
+    g.gain.linearRampToValueAtTime(0.12 * iv, t + 0.05)
+    g.gain.setValueAtTime(0.12 * iv, t + dur - 0.15)
     g.gain.linearRampToValueAtTime(0.0001, t + dur)
     const chop = ctx.createOscillator()
     chop.type = 'square'
@@ -488,6 +493,7 @@ export function makeAmbient() {
     const d = dest(x, z)
     if (!d) return
     const t = ctx.currentTime
+    const av = cat.ambience
     const o = ctx.createOscillator()
     o.type = 'sawtooth'
     o.frequency.setValueAtTime(640, t)
@@ -498,7 +504,7 @@ export function makeAmbient() {
     lp.frequency.value = 1800
     const g = ctx.createGain()
     g.gain.setValueAtTime(0.0001, t)
-    g.gain.exponentialRampToValueAtTime(0.13, t + 0.08)
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0001, 0.13 * av), t + 0.08)
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55)
     o.connect(lp).connect(g).connect(d)
     o.start(t)
@@ -512,6 +518,7 @@ export function makeAmbient() {
     if (!d) return
     const t = ctx.currentTime
     const dur = 5
+    const vv = cat.vehicles
     const osc = ctx.createOscillator()
     osc.type = 'square'
     osc.frequency.value = 680
@@ -526,8 +533,8 @@ export function makeAmbient() {
     lp.frequency.value = 1100
     const g = ctx.createGain()
     g.gain.setValueAtTime(0, t)
-    g.gain.linearRampToValueAtTime(0.04, t + 1)
-    g.gain.setValueAtTime(0.04, t + dur - 1.5)
+    g.gain.linearRampToValueAtTime(0.04 * vv, t + 1)
+    g.gain.setValueAtTime(0.04 * vv, t + dur - 1.5)
     g.gain.linearRampToValueAtTime(0.0001, t + dur)
     osc.connect(lp).connect(g).connect(d)
     osc.start(t)
@@ -541,6 +548,7 @@ export function makeAmbient() {
     if (!ctx || !master) return
     const t = ctx.currentTime + Math.max(0, delay)
     const dur = 2.6
+    const wv = cat.weather
     const nb = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate)
     const nd = nb.getChannelData(0)
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
@@ -552,7 +560,7 @@ export function makeAmbient() {
     lp.frequency.exponentialRampToValueAtTime(55, t + dur)
     const g = ctx.createGain()
     g.gain.setValueAtTime(0, t)
-    g.gain.linearRampToValueAtTime(0.5 * power, t + 0.08)
+    g.gain.linearRampToValueAtTime(0.5 * power * wv, t + 0.08)
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
     s.connect(lp).connect(g).connect(master)
     s.start(t)
@@ -564,7 +572,7 @@ export function makeAmbient() {
       o.frequency.setValueAtTime(58, t)
       o.frequency.exponentialRampToValueAtTime(30, t + 0.9)
       const og = ctx.createGain()
-      og.gain.setValueAtTime(0.3 * power, t)
+      og.gain.setValueAtTime(0.3 * power * wv, t)
       og.gain.exponentialRampToValueAtTime(0.0001, t + 1.1)
       o.connect(og).connect(master)
       o.start(t)
@@ -581,38 +589,44 @@ export function makeAmbient() {
     setDay(day: number) {
       if (!ctx || !dayG || !nightG) return
       const t = ctx.currentTime
-      dayG.gain.setTargetAtTime(0.5 * day + 0.04, t, 0.5)
-      nightG.gain.setTargetAtTime(0.4 * (1 - day), t, 0.5)
+      dayG.gain.setTargetAtTime(cat.ambience * (0.5 * day + 0.04), t, 0.5)
+      nightG.gain.setTargetAtTime(cat.ambience * 0.4 * (1 - day), t, 0.5)
     },
     setVolume: set,
+    setVolumes(v: Partial<typeof cat>) {
+      for (const k of ['ambience', 'vehicles', 'weather', 'interaction', 'footsteps'] as const) {
+        const n = v[k]
+        if (n !== undefined) cat[k] = clamp(n, 0, 1)
+      }
+    },
     setEngine(on: boolean, frac: number) {
       if (!ctx || !engOsc || !engSub || !engG) return
       const t = ctx.currentTime
       const f = 45 + clamp(frac, 0, 1) * 95
       engOsc.frequency.setTargetAtTime(f, t, 0.08)
       engSub.frequency.setTargetAtTime(f / 2, t, 0.08)
-      engG.gain.setTargetAtTime(on ? 0.05 + frac * 0.06 : 0, t, on ? 0.05 : 0.3)
+      engG.gain.setTargetAtTime(on ? cat.vehicles * (0.05 + frac * 0.06) : 0, t, on ? 0.05 : 0.3)
     },
     setSkid(level: number) {
       if (!ctx || !skidG) return
-      skidG.gain.setTargetAtTime(clamp(level, 0, 1) * 0.12, ctx.currentTime, 0.05)
+      skidG.gain.setTargetAtTime(clamp(level, 0, 1) * 0.12 * cat.vehicles, ctx.currentTime, 0.05)
     },
     setBuild(ac: number, drill: number) {
       if (!ctx || !acG || !drillG) return
       const t = ctx.currentTime
-      acG.gain.setTargetAtTime(0.12 * ac, t, 0.6)
-      drillG.gain.setTargetAtTime(0.3 * drill, t, 0.6)
+      acG.gain.setTargetAtTime(0.12 * ac * cat.ambience, t, 0.6)
+      drillG.gain.setTargetAtTime(0.3 * drill * cat.ambience, t, 0.6)
     },
     setZone(park: number, market: number, plaza: number) {
       if (!ctx || !parkG || !marketG || !plazaG) return
       const t = ctx.currentTime
-      parkG.gain.setTargetAtTime(0.6 * park, t, 0.6)
-      marketG.gain.setTargetAtTime(0.35 * market, t, 0.6)
-      plazaG.gain.setTargetAtTime(0.5 * plaza, t, 0.6)
+      parkG.gain.setTargetAtTime(0.6 * park * cat.ambience, t, 0.6)
+      marketG.gain.setTargetAtTime(0.35 * market * cat.ambience, t, 0.6)
+      plazaG.gain.setTargetAtTime(0.5 * plaza * cat.ambience, t, 0.6)
     },
     setBusker(level: number, x?: number, z?: number) {
       if (!ctx || !guitarG) return
-      guitarG.gain.setTargetAtTime(clamp(level, 0, 1) * 0.5, ctx.currentTime, 0.5)
+      guitarG.gain.setTargetAtTime(clamp(level, 0, 1) * 0.5 * cat.ambience, ctx.currentTime, 0.5)
       if (buskerPan && x !== undefined && z !== undefined) {
         buskerPan.positionX.value = x
         buskerPan.positionZ.value = z
@@ -657,6 +671,7 @@ export function makeAmbient() {
       return vol
     },
     dispose() {
+      clearInterval(buskerTimer)
       void ctx?.close()
       ctx = null
     },

@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState, type PointerEvent as RPE } from 'react'
-import type { Mode } from '../engine/engine'
-import { N, SPAN, HALF, CELL, ROAD } from '../engine/city'
+import type { Mode } from '../engine/types'
 import { IS_TOUCH, type Eng } from './eng'
 
 const MAP = 148
 const VIEW = 88
-const ZONE_FILL: Record<string, string> = { park: 'rgba(74,222,128,0.5)', market: 'rgba(251,191,36,0.5)', plaza: 'rgba(129,140,248,0.5)' }
+const ZONE_FILL: Record<string, string> = { park: 'rgba(74,222,128,0.5)', market: 'rgba(251,191,36,0.5)', plaza: 'rgba(129,140,248,0.5)', tower: 'rgba(148,163,184,0.6)', residential: 'rgba(244,114,182,0.5)', industrial: 'rgba(161,98,7,0.55)' }
+
+const LAYERS = [
+  { key: 'shops', label: 'Cửa hàng', color: '#fbbf24' },
+  { key: 'benches', label: 'Ghế', color: '#4ade80' },
+  { key: 'bikes', label: 'Xe đạp', color: '#22d3ee' },
+  { key: 'food', label: 'Hàng quán', color: '#f472b6' },
+  { key: 'busker', label: 'Nghệ sĩ', color: '#c084fc' },
+] as const
+type LayerKey = (typeof LAYERS)[number]['key']
 
 export function MiniMap({ eng }: { eng: () => Eng | null }) {
   const ref = useRef<HTMLCanvasElement>(null)
+  const [on, setOn] = useState<Record<LayerKey, boolean>>({ shops: true, benches: true, bikes: true, food: true, busker: true })
+  const onRef = useRef(on)
+  onRef.current = on
   useEffect(() => {
     const cv = ref.current!
     const D = Math.min(2, window.devicePixelRatio || 1)
@@ -17,17 +28,36 @@ export function MiniMap({ eng }: { eng: () => Eng | null }) {
     ctx.scale(D, D)
     const C = MAP / 2
     const s = C / VIEW
-    const px = (v: number) => (v + HALF) * s
-    const base = document.createElement('canvas')
-    base.width = base.height = Math.ceil(SPAN * s * D)
-    const b = base.getContext('2d')!
-    b.scale(D, D)
-    b.fillStyle = '#0e131b'
-    b.fillRect(0, 0, SPAN * s, SPAN * s)
-    b.fillStyle = '#232d38'
-    const W = (CELL - ROAD) * s
-    for (let i = 0; i < N - 1; i++) {
-      for (let j = 0; j < N - 1; j++) b.fillRect(px(-HALF + i * CELL + ROAD / 2), px(-HALF + j * CELL + ROAD / 2), W, W)
+    let base: HTMLCanvasElement | null = null
+    let px = (v: number) => v
+    let W = 0, spanPx = 0
+    let pois: ReturnType<Eng['pois']> | null = null
+    // effect của con chạy trước effect của cha nên engine chưa tồn tại lúc này — dựng base ở frame đầu
+    const buildBase = () => {
+      const g = eng()!.grid()
+      px = (v: number) => (v + g.HALF) * s
+      W = (g.CELL - g.ROAD) * s
+      spanPx = g.SPAN * s
+      base = document.createElement('canvas')
+      base.width = base.height = Math.ceil(spanPx * D)
+      const b = base.getContext('2d')!
+      b.scale(D, D)
+      b.fillStyle = '#0e131b'
+      b.fillRect(0, 0, spanPx, spanPx)
+      b.fillStyle = '#232d38'
+      for (let i = 0; i < g.N - 1; i++) {
+        for (let j = 0; j < g.N - 1; j++) b.fillRect(px(-g.HALF + i * g.CELL + g.ROAD / 2), px(-g.HALF + j * g.CELL + g.ROAD / 2), W, W)
+      }
+      pois = eng()!.pois()
+    }
+    const dot = (x: number, z: number, ox: number, oy: number, color: string) => {
+      const sx = px(x) + ox - C
+      const sz = px(z) + oy - C
+      if (Math.hypot(sx - C, sz - C) > C) return
+      ctx.fillStyle = color
+      ctx.beginPath()
+      ctx.arc(sx, sz, 2.2, 0, Math.PI * 2)
+      ctx.fill()
     }
     let raf = 0, last = 0
     const draw = (t: number) => {
@@ -36,6 +66,8 @@ export function MiniMap({ eng }: { eng: () => Eng | null }) {
       last = t
       const h = eng()?.hud()
       if (!h) return
+      if (!base) buildBase()
+      const bs = base!
       const ox = C - px(h.x)
       const oy = C - px(h.z)
       ctx.save()
@@ -47,11 +79,19 @@ export function MiniMap({ eng }: { eng: () => Eng | null }) {
       ctx.translate(C, C)
       ctx.rotate(h.yaw - Math.PI)
       ctx.translate(-C, -C)
-      ctx.drawImage(base, 0, 0, base.width, base.height, ox, oy, SPAN * s, SPAN * s)
+      ctx.drawImage(bs, 0, 0, bs.width, bs.height, ox, oy, spanPx, spanPx)
       for (const z of h.zones) {
         if (Math.hypot(px(z.x) + ox - C, px(z.z) + oy - C) > C + W) continue
         ctx.fillStyle = ZONE_FILL[z.kind]
         ctx.fillRect(px(z.x) + ox - W / 2, px(z.z) + oy - W / 2, W, W)
+      }
+      if (pois) {
+        const L = onRef.current
+        if (L.food) for (const p of pois.food) dot(p.x, p.z, ox, oy, '#f472b6')
+        if (L.bikes) for (const p of pois.bikes) dot(p.x, p.z, ox, oy, '#22d3ee')
+        if (L.benches) for (const p of pois.benches) dot(p.x, p.z, ox, oy, '#4ade80')
+        if (L.shops) for (const p of pois.shops) dot(p.x, p.z, ox, oy, '#fbbf24')
+        if (L.busker) dot(pois.busker.x, pois.busker.z, ox, oy, '#c084fc')
       }
       ctx.fillStyle = '#dbe4ee'
       for (let k = 0; k < h.cars.n; k++) {
@@ -73,11 +113,25 @@ export function MiniMap({ eng }: { eng: () => Eng | null }) {
     return () => cancelAnimationFrame(raf)
   }, [])
   return (
-    <canvas
-      ref={ref}
-      style={{ width: MAP, height: MAP }}
-      className={`pointer-events-none absolute rounded-full border border-white/10 shadow-lg ${IS_TOUCH ? 'right-3 top-14' : 'bottom-4 left-4'}`}
-    />
+    <>
+      <canvas
+        ref={ref}
+        style={{ width: MAP, height: MAP }}
+        className={`pointer-events-none absolute rounded-full border border-white/10 shadow-lg ${IS_TOUCH ? 'right-3 top-14' : 'bottom-4 left-4'}`}
+      />
+      <div className={`absolute flex flex-wrap gap-1 ${IS_TOUCH ? 'right-3 top-[calc(3.5rem+154px)] max-w-[150px] justify-end' : 'bottom-[calc(1rem+156px)] left-4'}`}>
+        {LAYERS.map((l) => (
+          <button
+            key={l.key}
+            onClick={() => setOn((o) => ({ ...o, [l.key]: !o[l.key] }))}
+            className={`flex min-h-11 items-center gap-1.5 rounded-md border px-2 text-[10px] font-medium backdrop-blur transition ${on[l.key] ? 'border-white/15 bg-black/55 text-slate-100' : 'border-white/5 bg-black/30 text-slate-500'}`}
+          >
+            <span className="h-2 w-2 rounded-full" style={{ background: l.color, opacity: on[l.key] ? 1 : 0.3 }} />
+            {l.label}
+          </button>
+        ))}
+      </div>
+    </>
   )
 }
 
@@ -116,7 +170,7 @@ export function Compass({ eng }: { eng: () => Eng | null }) {
   )
 }
 
-const POI_LABEL: Record<string, string> = { park: 'Công viên', market: 'Chợ', plaza: 'Quảng trường', tower: 'Toà tháp' }
+const POI_LABEL: Record<string, string> = { park: 'Công viên', market: 'Chợ', plaza: 'Quảng trường', tower: 'Toà tháp', residential: 'Dân cư', industrial: 'Khu công nghiệp' }
 
 export function PoiMarkers({ eng }: { eng: () => Eng | null }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -155,6 +209,75 @@ export function PoiMarkers({ eng }: { eng: () => Eng | null }) {
         <span key={i} className="absolute left-0 top-0 rounded-md bg-black/55 px-2 py-1 text-[10px] font-medium text-slate-100 opacity-0 backdrop-blur-sm" />
       ))}
     </div>
+  )
+}
+
+const HINTS_KEY = 'cs.hints'
+const loadHints = (): Set<string> => {
+  try {
+    return new Set<string>(JSON.parse(localStorage.getItem(HINTS_KEY) || '[]') as string[])
+  } catch {
+    return new Set<string>()
+  }
+}
+const MODE_TEXT = [
+  'Đi bộ — WASD để dạo, chuột để nhìn, giữ Shift để chạy.',
+  'Quan sát — O (hoặc nút 👁) để phóng camera tự do quanh phố.',
+  'Lái xe — lại gần một chiếc xe rồi nhấn E để lên, E lần nữa để xuống.',
+  'Chụp ảnh — F (hoặc nút 📷) để mở máy ảnh, đổi bộ lọc và lưu ảnh.',
+]
+
+// E8: context hints that only surface next to the thing they describe, and never again once shown.
+export function ContextHint({ eng, started, intro, setIntro }: { eng: () => Eng | null; started: boolean; intro: boolean; setIntro: (v: boolean) => void }) {
+  const [learned, setLearned] = useState<Set<string>>(loadHints)
+  const [text, setText] = useState<string | null>(null)
+  const last = useRef<string | null>(null)
+  const rainId = useRef<number>(0)
+
+  const persist = (k: string) => setLearned((p) => { if (p.has(k)) return p; const n = new Set(p); n.add(k); localStorage.setItem(HINTS_KEY, JSON.stringify([...n])); return n })
+
+  useEffect(() => {
+    if (!started) return
+    const id = setInterval(() => {
+      const h = eng()?.hint()
+      const k = h && !learned.has(h.key) ? h.key : null
+      if (k === last.current) return
+      if (last.current === 'rain' && k !== 'rain') { clearTimeout(rainId.current); rainId.current = 0 }
+      last.current = k
+      setText(k ? h!.text : null)
+      if (k === 'drive') persist(k)
+      else if (k === 'rain') { rainId.current = window.setTimeout(() => persist('rain'), 6000) }
+      else if (k) persist(k)
+    }, 300)
+    return () => { clearInterval(id); clearTimeout(rainId.current) }
+  }, [started, learned])
+
+  const closeIntro = () => { localStorage.setItem('cs.intro', '1'); setIntro(false) }
+
+  return (
+    <>
+      {text && (
+        <div className={`pointer-events-none absolute rounded-md border border-sky-300/25 bg-black/55 px-3 py-1.5 text-[11px] text-slate-100 backdrop-blur ${IS_TOUCH ? 'bottom-[max(4.5rem,calc(env(safe-area-inset-bottom)+2rem))] left-1/2 -translate-x-1/2' : 'bottom-5 right-4'}`}>
+          {text}
+        </div>
+      )}
+      {intro && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm" onClick={closeIntro}>
+          <div className="pointer-events-auto rounded-xl border border-white/10 bg-black/45 p-5 text-[11px] text-slate-200 shadow-lg backdrop-blur-md max-w-md space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[13px] font-semibold tracking-wide text-white">Bốn cách ngắm thành phố</div>
+            {MODE_TEXT.map((t, i) => (
+              <div key={i} className="flex gap-2.5 text-[12px] leading-relaxed text-slate-200">
+                <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-300" />
+                <span>{t}</span>
+              </div>
+            ))}
+            <button className="rounded-md bg-white/5 px-2.5 py-1 text-[10px] font-medium text-slate-300 transition hover:bg-white/10 w-full" onClick={closeIntro}>
+              Đã hiểu
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

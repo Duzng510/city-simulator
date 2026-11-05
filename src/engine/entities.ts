@@ -4,24 +4,10 @@ import { CELL, HALF, N, ROAD, line } from './city'
 import type { Door } from './city'
 import type { Textures } from './textures'
 import { rng, rushHour, clamp, lerp } from './util'
-
-const paint = (g: THREE.BufferGeometry, c: THREE.Color) => {
-  const n = g.attributes.position.count
-  const a = new Float32Array(n * 3)
-  for (let i = 0; i < n; i++) {
-    a[i * 3] = c.r
-    a[i * 3 + 1] = c.g
-    a[i * 3 + 2] = c.b
-  }
-  g.setAttribute('color', new THREE.BufferAttribute(a, 3))
-  return g
-}
-
-const boxAt = (w: number, h: number, d: number, x: number, y: number, z: number) => {
-  const g = new THREE.BoxGeometry(w, h, d)
-  g.translate(x, y, z)
-  return g
-}
+import { boxAt, paint } from './geo'
+import { makeWildlife } from './wildlife'
+import type { Traffic } from './traffic'
+import { STOP } from './traffic'
 
 const CARS = 96
 const PEDS = 220
@@ -29,7 +15,7 @@ const NB = 3, NV = 5 // 3 bus lines + 2 delivery trucks, all in car slots 0..4
 
 export interface Entities {
   group: THREE.Group
-  update: (dt: number, t: number, hour: number, night: number, rain: number, px: number, pz: number, walking: boolean, pedBoost?: number) => void
+  update: (dt: number, t: number, hour: number, night: number, rain: number, px: number, pz: number, walking: boolean, pedBoost?: number, density?: number) => void
   onHonk: (fn: (x: number, z: number) => void) => void
   tryEnter: (x: number, z: number, maxR: number) => { x: number; z: number; h: number } | null
   drive: (x: number, z: number, h: number, roll?: number, pitch?: number, brake?: number) => void
@@ -42,9 +28,19 @@ export interface Entities {
   carPush: (v: THREE.Vector3) => void
 }
 
-export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], parks: { x: number; z: number }[] = [], alleys: { x: number; z: number; px: number; pz: number; py: number }[] = []) {
+export function buildEntities(
+  tex: Textures,
+  seed = 5150,
+  doors: Door[] = [],
+  parks: { x: number; z: number }[] = [],
+  alleys: { x: number; z: number; px: number; pz: number; py: number }[] = [],
+  tr?: Traffic,
+  benches: { x: number; z: number; ry: number }[] = [],
+  awnings: { x: number; z: number; ry: number }[] = [],
+) {
   const group = new THREE.Group()
   const rand = rng(seed)
+  const TR: { greenAxis: Traffic['greenAxis']; level: Traffic['level'] } = tr ?? { greenAxis: () => -1, level: () => 2 }
 
   // ---- cars: three silhouette variants (sedan / sports / van), each its own instanced mesh
   const white = new THREE.Color(0xffffff)
@@ -296,8 +292,25 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   const peds = new THREE.InstancedMesh(pedGeo, [legMat, clothMat, clothMat], PEDS)
   peds.frustumCulled = false
   peds.castShadow = true
+  // F2: ped là instanced nên không đổi tư thế từng người được — ngồi là một mesh riêng, chân duỗi
+  // trước, thân hạ thấp, dùng chung màu với mesh đứng
+  const pedsSit = new THREE.InstancedMesh(
+    mergeGeometries(
+      [
+        paint(mergeGeometries([boxAt(0.15, 0.16, 0.52, -0.11, 0.5, 0.22), boxAt(0.15, 0.16, 0.52, 0.11, 0.5, 0.22), boxAt(0.15, 0.42, 0.16, -0.11, 0.29, 0.42), boxAt(0.15, 0.42, 0.16, 0.11, 0.29, 0.42)], false)!, new THREE.Color(0x2b2f3a)),
+        paint(mergeGeometries([boxAt(0.42, 0.6, 0.24, 0, 0.96, 0), boxAt(0.12, 0.55, 0.14, -0.27, 0.98, 0), boxAt(0.12, 0.55, 0.14, 0.27, 0.98, 0)], false)!, white),
+        paint(new THREE.SphereGeometry(0.14, 10, 8).translate(0, 1.4, 0), skin),
+      ],
+      true,
+    )!,
+    [legMat, clothMat, clothMat],
+    PEDS,
+  )
+  pedsSit.frustumCulled = false
+  pedsSit.castShadow = true
+  pedsSit.visible = false
 
-  const ped = { i: new Int8Array(PEDS), j: new Int8Array(PEDS), u: new Float32Array(PEDS), v: new Float32Array(PEDS), s: new Float32Array(PEDS), pd: new Float32Array(PEDS), ph: new Float32Array(PEDS), pc: new Int8Array(PEDS), idle: new Uint8Array(PEDS), st: new Int8Array(PEDS), cw: new Float32Array(PEDS), cx: new Float32Array(PEDS), px: new Float32Array(PEDS), pz: new Float32Array(PEDS), hd: new Float32Array(PEDS), frz: new Float32Array(PEDS), hi: new Int8Array(PEDS), hj: new Int8Array(PEDS), di: new Int8Array(PEDS), dj: new Int8Array(PEDS), ps: new Uint8Array(PEDS), rest: new Float32Array(PEDS), umbrella: new Uint8Array(PEDS), board: new Uint8Array(PEDS), bt: new Float32Array(PEDS), lk: new Float32Array(PEDS), tk: new Float32Array(PEDS), tp: new Int16Array(PEDS) }
+  const ped = { i: new Int8Array(PEDS), j: new Int8Array(PEDS), u: new Float32Array(PEDS), v: new Float32Array(PEDS), s: new Float32Array(PEDS), pd: new Float32Array(PEDS), ph: new Float32Array(PEDS), pc: new Int8Array(PEDS), idle: new Uint8Array(PEDS), st: new Int8Array(PEDS), cw: new Float32Array(PEDS), cx: new Float32Array(PEDS), px: new Float32Array(PEDS), pz: new Float32Array(PEDS), hd: new Float32Array(PEDS), frz: new Float32Array(PEDS), hi: new Int8Array(PEDS), hj: new Int8Array(PEDS), di: new Int8Array(PEDS), dj: new Int8Array(PEDS), ps: new Uint8Array(PEDS), rest: new Float32Array(PEDS), umbrella: new Uint8Array(PEDS), board: new Uint8Array(PEDS), bt: new Float32Array(PEDS), lk: new Float32Array(PEDS), tk: new Float32Array(PEDS), tp: new Int16Array(PEDS), gk: new Int8Array(PEDS), ga: new Float32Array(PEDS), gt: new Float32Array(PEDS), gx: new Float32Array(PEDS), gz: new Float32Array(PEDS), gy: new Float32Array(PEDS), own: new Int16Array(PEDS).fill(-1) }
   let pedVisible = PEDS
   // constants for edge positions (CELL - ROAD - 2.8 per side)
   const EDGE = CELL - ROAD - 2.8
@@ -310,6 +323,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     ped.s[k] = 0.85 + rand() * 0.35
     tint.setHSL(rand(), 0.2 + rand() * 0.5, 0.35 + rand() * 0.4)
     peds.setColorAt(k, tint)
+    pedsSit.setColorAt(k, tint)
 
     // ~18% are idle: stand at edge midpoint rather than walking
     if (rand() < 0.18) {
@@ -337,9 +351,21 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     while (di === ped.hi[k] && dj === ped.hj[k]) { di = Math.floor(rand() * (N - 1)); dj = Math.floor(rand() * (N - 1)) }
     ped.di[k] = di; ped.dj[k] = dj; ped.ps[k] = 0
   }
+  // F2: 1/4 số xe đậu ven đường có chủ — ped đó lang thang rồi sẽ quay lại lấy xe
+  let po = 0
+  for (let k = RV; k < CARS; k++) {
+    if (car.v0[k] !== 0 || k % 4) continue
+    while (po < PEDS && ped.idle[po]) po++
+    if (po >= PEDS) break
+    ped.own[po] = k
+    po++
+  }
+  m4.makeScale(0, 0, 0)
+  for (let k = 0; k < PEDS; k++) pedsSit.setMatrixAt(k, m4)
   if (peds.instanceColor) peds.instanceColor.needsUpdate = true
   if (umbrellas.instanceColor) umbrellas.instanceColor.needsUpdate = true
   group.add(peds)
+  group.add(pedsSit)
   group.add(umbrellas)
 
   const pos = new THREE.Vector3()
@@ -386,20 +412,65 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
   let pp = (rand() * 2 - 1) * HALF, ph = 0, pSir = 0
   let sirenCb = (_x: number, _z: number) => {}
 
-  const tlOff = new Float32Array(N * N), tlPer = new Float32Array(N * N)
-  for (let i = 0; i < N * N; i++) { tlOff[i] = rand() * 14; tlPer[i] = 10 + rand() * 6 }
-  // axis whose traffic flows at time t at intersection (I,J) — peds may only cross the perpendicular road
-  const greenAxis = (I: number, J: number, t: number) => {
-    if (I < 0 || J < 0 || I >= N || J >= N) return -1
-    return (((t + tlOff[I * N + J]) % tlPer[I * N + J]) / tlPer[I * N + J]) < 0.5 ? 0 : 1
+  let emX = HALF * 3, emZ = HALF * 3 // vị trí xe ưu tiên ở frame trước, cho rule nhường đường ở loop xe
+
+  const shopSpots = doors.map((d) => ({ x: d.hx, z: d.hz, ry: d.ry }))
+  const setGoal = (m: number, x: number, z: number, ry: number, kind: number, stay: number) => {
+    ped.gk[m] = kind
+    ped.ga[m] = 0
+    ped.gt[m] = stay
+    ped.gx[m] = x
+    ped.gz[m] = z
+    ped.gy[m] = ry
+  }
+  const nearestSpot = (list: { x: number; z: number }[], x: number, z: number, maxR: number) => {
+    let best = -1
+    let bd = maxR * maxR
+    for (let i = 0; i < list.length; i++) {
+      const dd = (list[i].x - x) ** 2 + (list[i].z - z) ** 2
+      if (dd < bd) { bd = dd; best = i }
+    }
+    return best
+  }
+  // xe về lề: đậu slot lại ngay chỗ nó đứng và đặt chủ nó lên lề block gần nhất
+  const releaseCar = (m: number) => {
+    const k = ped.own[m]
+    if (k < 0) return
+    const x = car.cx[k], z = car.cz[k]
+    const a = car.axis[k], d = car.dir[k]
+    car.v0[k] = 0
+    car.v[k] = 0
+    car.off[k] = (a === 0 ? 1 : -1) * d * (ROAD / 2 - 1.15)
+    lastParkedK = k
+    const i = Math.max(0, Math.min(N - 2, Math.floor((x + HALF) / CELL)))
+    const j = Math.max(0, Math.min(N - 2, Math.floor((z + HALF) / CELL)))
+    const x0 = line(i) + 7.4, z0 = line(j) + 7.4
+    const w = CELL - 14.8, per = 4 * w
+    const x1 = x0 + w, z1 = z0 + w
+    const d0 = Math.abs(z - z0), d1 = Math.abs(x - x1), d2 = Math.abs(z - z1), d3 = Math.abs(x - x0)
+    const e = d0 <= d1 && d0 <= d2 && d0 <= d3 ? 0 : d1 <= d2 && d1 <= d3 ? 1 : d2 <= d3 ? 2 : 3
+    const u = [(x - x0) / per, (w + (z - z0)) / per, (2 * w + (x1 - x)) / per, (3 * w + (z1 - z)) / per][e]
+    ped.i[m] = i
+    ped.j[m] = j
+    ped.hi[m] = i
+    ped.hj[m] = j
+    ped.u[m] = ((u % 1) + 1) % 1
+    ped.pc[m] = e
+    ped.ps[m] = 1
+    ped.rest[m] = 25
+    ped.gk[m] = 0
+    ped.ga[m] = 0
+    ped.gt[m] = 0
+    m4.makeScale(0, 0, 0)
+    pedsSit.setMatrixAt(m, m4)
   }
 
-  const update = (dt: number, t: number, hour: number, night: number, rain: number, px: number, pz: number, walking: boolean, pedBoost = 0) => {
-    // traffic density scales with rush hour (0.4× at midnight, 1.0× at rush)
+  const update = (dt: number, t: number, hour: number, night: number, rain: number, px: number, pz: number, walking: boolean, pedBoost = 0, density = 1) => {
+    // traffic density scales with rush hour (0.4× at midnight, 1.0× at rush); density = C14 khu+giờ
     const rush = rushHour(hour)
     lpx = px
     lpz = pz
-    const traffic = 0.4 + 0.6 * rush
+    const traffic = Math.min(1, (0.4 + 0.6 * rush) * density)
     // weather/time behaviour: rain sends peds hurrying (×2) and slows cars 30%; rush crowds walk faster
     const pedF = (1 + rain) * (1 + 0.4 * rush)
     const carF = 1 - 0.3 * rain
@@ -410,8 +481,9 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       for (const m of cvCars) m.count = carN
       lights.count = heads.count = beams.count = wet.count = carN
     }
-    // pedestrian density scales with daylight (15% at night, 85% at noon); pedBoost packs the streets at the start
-    const pedN = Math.min(PEDS, Math.floor(PEDS * (0.15 + 0.7 * (1 - night))) + pedBoost)
+    // pedestrian density scales with daylight (15% at night, 85% at noon) × C14 district factor;
+    // pedBoost packs the streets at the start (kept additive, unaffected by density)
+    const pedN = Math.max(0, Math.min(PEDS, Math.floor(PEDS * (0.15 + 0.7 * (1 - night)) * density) + pedBoost))
     if (peds.count !== pedN) peds.count = pedN
     pedVisible = pedN
 
@@ -458,10 +530,14 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       if (car.v0[k] > 0) {
         const ai = Math.min(N - 1, Math.max(0, Math.round((car.p[k] + HALF) / CELL)))
         const g = Math.abs(car.p[k] - line(ai))
-        const ii = a === 0 ? ai * N + car.line[k] : car.line[k] * N + ai
-        const phase = ((t + tlOff[ii]) % tlPer[ii]) / tlPer[ii]
-        const greenAxis = phase < 0.5 ? 0 : 1
-        let tgt = a !== greenAxis && g < 18 ? 0 : car.v0[k] * carF
+        // F1: đọc đèn từ traffic.ts. Hổ phách mà đã sát vạch thì cho đi tiếp — thắng gấp giữa
+        // giao lộ đọc tệ hơn là vượt nhẹ.
+        const lv = TR.level(a === 0 ? ai : car.line[k], a === 0 ? car.line[k] : ai, a, t)
+        const hold = lv === 0 || (lv === 1 && g > STOP + car.v[k] * 0.5)
+        let tgt = hold && g < 18 ? 0 : car.v0[k] * carF
+        // D3: sau khi nhường xe ưu tiên thì tự trả về giữa làn (xe buýt tự lo lane của nó)
+        const laneOff = (a === 0 ? 1 : -1) * d * 3.1
+        if (!car.rv[k] && Math.abs(car.off[k]) > 4) car.off[k] += (laneOff - car.off[k]) * Math.min(1, dt * 0.5)
         if (car.rv[k]) {
           // route vehicle: slow in over the last 26 m, dwell at the stop, then hand to the next one
           const ri = car.rv[k] - 1, r = rvSpec[ri]
@@ -512,6 +588,19 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           const nz = a === 0 ? line(car.line[k]) : line(ai)
           for (let m = 0; m < pedVisible; m++) {
             if (Math.abs(ped.px[m] - nx) < 7 && Math.abs(ped.pz[m] - nz) < 7) { tgt = 0; break }
+          }
+        }
+        // D3: xe ưu tiên tới gần trong làn hoặc cắt ngang phía trước thì dừng hẳn và dạt vào lề
+        {
+          const edx = emX - ox, edz = emZ - oz
+          const al = edx * hx + edz * hz
+          if (al > -6 && al < 22 && Math.abs(edx * hz - edz * hx) < 4.5) {
+            tgt = 0
+            if (!car.rv[k] && al < 15) {
+              // dạt sát lề (5.4) chứ không vào đúng chỗ xe đậu: xe ưu tiên đi 3.1, chừa 2.3m
+              const curb = Math.sign(car.off[k] || 1) * (ROAD / 2 - 0.6)
+              car.off[k] += (curb - car.off[k]) * Math.min(1, dt * 1.5)
+            }
           }
         }
         // B1: the walking player is a pedestrian anywhere in the road, not only in a crosswalk
@@ -650,6 +739,8 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     if (pp > lim) pp = -lim
     else if (pp < -lim) pp = lim
     const pLine = line(pl), pwx = pa === 0 ? pp : pLine + 3.1, pwz = pa === 0 ? pLine + 3.1 : pp
+    emX = pwx
+    emZ = pwz
     police.position.set(pwx, 0.055, pwz)
     const pTgt = pa === 0 ? (pd > 0 ? Math.PI / 2 : -Math.PI / 2) : pd > 0 ? 0 : Math.PI
     ph += ((pTgt - ph + Math.PI * 3) % (Math.PI * 2) - Math.PI) * Math.min(1, dt * 6)
@@ -663,6 +754,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       else pSir = 3
     }
 
+    let anySit = false
     for (let k = 0; k < PEDS; k++) {
       if (ped.frz[k] > 0) {
         ped.frz[k] -= dt
@@ -679,6 +771,74 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           m4.makeScale(0, 0, 0); peds.setMatrixAt(k, m4)
           m4u.makeScale(0, 0, 0); umbrellas.setMatrixAt(k, m4u)
           continue
+        }
+      }
+      // F2: intent — mỗi NPC chỉ cần một điểm tới gần nhất rồi làm gì đó ở đó: ngồi ghế (1),
+      // vào tiệm (2), trú dưới mái hiên (3), lên xe của mình (4). Không có pathfinding: đoạn
+      // từ lề vào điểm tới là đường thẳng ngắn, đủ để không thấy xuyên tường.
+      if (ped.gk[k]) {
+        const g = ped.gk[k]
+        if (ped.ga[k] < 1) {
+          ped.ga[k] = Math.min(1, ped.ga[k] + dt * 0.55)
+          if (ped.ga[k] >= 1 && g === 4) {
+            // lên xe: slot đậu được bật máy, ped biến mất cùng chiếc xe
+            const c = ped.own[k]
+            car.v0[c] = 9
+            car.off[c] = (car.axis[c] === 0 ? 1 : -1) * car.dir[c] * 3.1
+            car.dec[c] = -1
+            car.turn[c] = 0
+            car.arc[c] = 0
+            car.ni[c] = nextNI(car.p[c], car.dir[c])
+            if (lastParkedK === c) lastParkedK = -1
+          }
+        } else if (ped.gt[k] > 0) {
+          ped.gt[k] -= dt
+          if (ped.gt[k] <= 0 && g === 4) releaseCar(k)
+        } else {
+          ped.ga[k] = Math.max(0, ped.ga[k] - dt * 0.55)
+          // gt âm = còn nguội, tránh một người đứng mái hiên nào cũng nhảy vào trú mãi
+          if (ped.ga[k] <= 0) { ped.gk[k] = 0; ped.gt[k] = -20 - ped.s[k] * 20 }
+        }
+        if (ped.ga[k] >= 1 && (g === 2 || g === 4)) {
+          // trong tiệm / trên xe: ẩn cả người lẫn ô
+          ped.px[k] = ped.gx[k]
+          ped.pz[k] = ped.gz[k]
+          m4.makeScale(0, 0, 0)
+          peds.setMatrixAt(k, m4)
+          m4u.makeScale(0, 0, 0)
+          umbrellas.setMatrixAt(k, m4u)
+          continue
+        }
+        if (ped.ga[k] >= 1 && g === 1) {
+          anySit = true
+          ped.px[k] = ped.gx[k]
+          ped.pz[k] = ped.gz[k]
+          pos.set(ped.gx[k], 0.1, ped.gz[k])
+          q.setFromAxisAngle(up, ped.gy[k])
+          m4.compose(pos, q, sc.setScalar(ped.s[k]))
+          pedsSit.setMatrixAt(k, m4)
+          m4.makeScale(0, 0, 0)
+          peds.setMatrixAt(k, m4)
+          m4u.makeScale(0, 0, 0)
+          umbrellas.setMatrixAt(k, m4u)
+          if (ped.gt[k] > 0) continue
+          pedsSit.setMatrixAt(k, m4) // đang đứng lên
+        }
+      } else if (!ped.idle[k] && !ped.board[k]) {
+        const c = ped.own[k]
+        if (ped.gt[k] < 0) ped.gt[k] += dt
+        else if (c >= 0 && ped.ps[k] === 1 && ped.rest[k] < 1 && car.v0[c] === 0 && (car.cx[c] - ped.px[k]) ** 2 + (car.cz[c] - ped.pz[k]) ** 2 < 1600)
+          setGoal(k, car.cx[c], car.cz[c], car.h[c], 4, 40 + ped.s[k] * 60)
+        else if (rain > 0.62 && ped.st[k] === 2 && ped.cw[k] > 0.4) {
+          const b = nearestSpot(shopSpots, ped.px[k], ped.pz[k], 26)
+          if (b >= 0) setGoal(k, shopSpots[b].x, shopSpots[b].z, shopSpots[b].ry, 2, 15 + ped.s[k] * 35)
+        } else if (rain > 0.3 && !ped.st[k] && ped.pd[k] > 0) {
+          // chỉ quyết định lúc vừa dừng ở góc phố, không phải mỗi frame
+          const b = nearestSpot(awnings, ped.px[k], ped.pz[k], 18)
+          if (b >= 0) setGoal(k, awnings[b].x, awnings[b].z, awnings[b].ry, 3, 20 + ped.s[k] * 40)
+        } else if (ped.ps[k] === 1 && ped.rest[k] > 12 && ped.rest[k] < 12.5) {
+          const b = nearestSpot(benches, ped.px[k], ped.pz[k], 22)
+          if (b >= 0) setGoal(k, benches[b].x, benches[b].z, benches[b].ry, 1, 25 + ped.s[k] * 45)
         }
       }
       const i = ped.i[k], j = ped.j[k], s = Math.sign(ped.v[k])
@@ -712,7 +872,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       const per = 2 * (wx + wz)
 
       // corner detection (skip for idle): cross only toward the target, else keep circling to the facing corner
-      if (!ped.idle[k] && ped.st[k] === 0) {
+      if (!ped.idle[k] && !ped.gk[k] && ped.st[k] === 0) {
         const d0 = ped.u[k] * per
         const c = d0 < wx ? 0 : d0 < wx + wz ? 1 : d0 < 2 * wx + wz ? 2 : 3
         if (c !== ped.pc[k]) {
@@ -759,9 +919,10 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       let vv = ped.v[k]
       if (ped.tk[k] > 0) { ped.tk[k] -= dt; vv = 0 }
       else if (stand) vv = 0
+      else if (ped.gk[k]) vv = 0
       else if (ped.st[k] === 1) {
         const req = cnx !== 0 ? 1 : 0 // wait until traffic on the crossed axis is stopped
-        const g = greenAxis(I, J, t)
+        const g = TR.greenAxis(I, J, t)
         const inRange = i + cnx >= 0 && i + cnx <= N - 2 && j + cnz >= 0 && j + cnz <= N - 2
         if (inRange && (g === -1 || g !== req)) {
           ped.st[k] = 2
@@ -820,6 +981,18 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
           ped.cw[k] = 0
         }
       }
+      // F2: pha đi tới / quay lại — lẫn vị trí từ lề phố vào điểm tới, hướng nhìn về chỗ đó
+      if (ped.gk[k]) {
+        const a = ped.ga[k], sa = a * a * (3 - 2 * a)
+        const tx = ped.gx[k] - x, tz = ped.gz[k] - z
+        x += tx * sa
+        z += tz * sa
+        if (a < 1 && ped.gt[k] > 0) {
+          const tl = Math.hypot(tx, tz) || 1
+          fx = tx / tl
+          fz = tz / tl
+        }
+      }
       ped.px[k] = x
       ped.pz[k] = z
       // D13: world nhận ra player. Cổ quay tối đa 90° so với hướng bước (không ai quay hẳn lưng
@@ -858,141 +1031,13 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
       umbrellas.setMatrixAt(k, m4u)
     }
     peds.instanceMatrix.needsUpdate = true
+    pedsSit.visible = anySit
+    if (anySit) pedsSit.instanceMatrix.needsUpdate = true
     umbrellas.instanceMatrix.needsUpdate = true
     umbrellas.count = pedVisible
     umbrellas.visible = rain > 0.5
 
-    // birds: 0 circle, 1 flee, 2 perch, 3 home in for a landing
-    for (let k = 0; k < NBIRD; k++) {
-      const home = parks[b.home[k]]
-      const ox = b.x[k], oz = b.z[k]
-      b.t[k] += dt
-      b.g[k] += dt
-      const near = Math.hypot(px - b.x[k], pz - b.z[k])
-      if (b.st[k] === 0) {
-        b.a[k] += b.w[k] * dt
-        b.x[k] = home.x + Math.cos(b.a[k]) * b.r[k]
-        b.z[k] = home.z + Math.sin(b.a[k]) * b.r[k]
-        b.y[k] = b.cy[k] + Math.sin(b.t[k] * 0.8 + b.ph[k]) * 0.6
-      } else if (b.st[k] === 1) {
-        b.x[k] += b.vx[k] * dt
-        b.z[k] += b.vz[k] * dt
-        b.y[k] = Math.min(17, b.y[k] + 4.5 * dt)
-        if (b.g[k] > 4) { b.st[k] = 3; b.g[k] = 0 }
-      } else if (b.st[k] === 3) {
-        const dx = b.px[k] - b.x[k], dz = b.pz[k] - b.z[k], dy = 0.22 - b.y[k]
-        const d = Math.hypot(dx, dy, dz)
-        if (d < 0.7) { b.st[k] = 2; b.g[k] = 0 }
-        else {
-          const s = 7 * dt / d
-          b.x[k] += dx * s
-          b.z[k] += dz * s
-          b.y[k] += dy * s
-        }
-      } else {
-        b.y[k] = 0.22
-        if (b.g[k] > 12 + b.ph[k]) { b.st[k] = 0; b.g[k] = 0 }
-      }
-      if ((b.st[k] === 0 && near < b.sr[k]) || (b.st[k] === 2 && near < b.sr[k] * 0.7)) {
-        const ang = Math.atan2(b.x[k] - px, b.z[k] - pz) + (b.ph[k] - 4.5) * 0.12
-        b.st[k] = 1
-        b.g[k] = 0
-        b.vx[k] = Math.sin(ang) * 10
-        b.vz[k] = Math.cos(ang) * 10
-      }
-      const mx = b.x[k] - ox, mz = b.z[k] - oz
-      if (mx * mx + mz * mz > 1e-7) b.hd[k] = Math.atan2(mx, mz)
-      const flap = b.st[k] === 2 ? 0.05 : Math.sin(b.t[k] * (9 + b.sz[k] * 8) + b.ph[k]) * 0.55
-      q.setFromAxisAngle(up, b.hd[k])
-      pos.set(b.x[k], b.y[k], b.z[k])
-      for (const [m, sgn] of wings) {
-        qd.copy(q).multiply(q2.setFromAxisAngle(rollAxis, flap * sgn))
-        m4.compose(pos, qd, sc.setScalar(b.sz[k]))
-        m.setMatrixAt(k, m4)
-      }
-    }
-    for (const [m] of wings) m.instanceMatrix.needsUpdate = true
-
-    // fireflies: drift the whole cloud by feeding time to the shader; brighten only well after dusk.
-    // Street flies want a clearer, calmer summer night than the park ones (C8).
-    parkFlies.mat.uniforms.t.value = t
-    parkFlies.mat.uniforms.bright.value = night > 0.5 ? (night - 0.5) * 2 : 0
-    parkFlies.p.visible = night > 0.5
-    streetFlies.mat.uniforms.t.value = t
-    const streetOn = night > 0.6 && rain < 0.2
-    streetFlies.mat.uniforms.bright.value = streetOn ? (night - 0.6) * 2.5 : 0
-    streetFlies.p.visible = streetOn
-
-    // pigeons: perch on the plaza, scatter when you walk under, respawn after a pause
-    for (let k = 0; k < NPIG; k++) {
-      pig.g[k] += dt
-      if (pig.st[k] === 0) {
-        if (Math.hypot(px - pig.x[k], pz - pig.z[k]) < 3) {
-          const ang = Math.atan2(pig.x[k] - px, pig.z[k] - pz) + (pig.ph[k] - 4.5) * 0.1
-          pig.st[k] = 1
-          pig.g[k] = 0
-          pig.vx[k] = Math.sin(ang) * 7
-          pig.vz[k] = Math.cos(ang) * 7
-        }
-      } else if (pig.st[k] === 1) {
-        pig.x[k] += pig.vx[k] * dt
-        pig.z[k] += pig.vz[k] * dt
-        pig.y[k] = Math.min(16, pig.y[k] + 5 * dt)
-        if (pig.g[k] > 1.1) { pig.st[k] = 2; pig.g[k] = 0 }
-      } else if (pig.st[k] === 2 && pig.g[k] > 20) {
-        pig.st[k] = 0
-        pig.g[k] = 0
-        pig.x[k] = pig.bx[k]
-        pig.z[k] = pig.bz[k]
-        pig.y[k] = 0.18
-      }
-      const vis = pig.st[k] === 2 ? 0 : 1
-      pos.set(pig.x[k], pig.y[k], pig.z[k])
-      q.setFromAxisAngle(up, pig.hd[k])
-      m4.compose(pos, q, sc.setScalar(vis ? pig.sz[k] : 0))
-      pigeons.setMatrixAt(k, m4)
-    }
-    pigeons.instanceMatrix.needsUpdate = true
-
-    // alley cats: idle by the dumpster, dart up onto the lid when you get close, hop back down after a while
-    for (let k = 0; k < NCAT; k++) {
-      const c = cat
-      const near = Math.hypot(px - c.x[k], pz - c.z[k])
-      if (c.st[k] === 0) {
-        if (near < 4) { c.st[k] = 1; c.g[k] = 0; meowCb(c.x[k], c.z[k]) }
-      } else if (c.st[k] === 1) {
-        const s = Math.min(1, dt * 6)
-        c.x[k] += (c.px[k] - c.x[k]) * s
-        c.z[k] += (c.pz[k] - c.z[k]) * s
-        c.y[k] += (c.py[k] - c.y[k]) * s
-        if (Math.hypot(c.px[k] - c.x[k], c.py[k] - c.y[k], c.pz[k] - c.z[k]) < 0.12) { c.st[k] = 2; c.g[k] = 0 }
-      } else if (c.st[k] === 2) {
-        c.g[k] += dt
-        c.y[k] = c.py[k] + Math.sin(t * 1.6 + k) * 0.01
-        if (c.g[k] > 15 && near > 6) { c.st[k] = 3; c.g[k] = 0 }
-      } else {
-        const s = Math.min(1, dt * 5)
-        c.x[k] += (c.hx[k] - c.x[k]) * s
-        c.z[k] += (c.hz[k] - c.z[k]) * s
-        c.y[k] += (0.16 - c.y[k]) * s
-        if (Math.hypot(c.hx[k] - c.x[k], c.hz[k] - c.z[k]) < 0.12) { c.st[k] = 0; c.y[k] = 0.16 }
-      }
-      const mvx = c.px[k] - c.x[k], mvz = c.pz[k] - c.z[k]
-      if (c.st[k] !== 2 && mvx * mvx + mvz * mvz > 1e-4) c.hd[k] = Math.atan2(mvx, mvz)
-      pos.set(c.x[k], c.y[k], c.z[k])
-      q.setFromAxisAngle(up, c.hd[k])
-      m4.compose(pos, q, one)
-      cats.setMatrixAt(k, m4)
-      // two additive eye points just ahead of the head, only after dusk
-      const glow = night > 0.4 ? 1 : 0
-      pos.set(c.x[k], c.y[k] + 0.14, c.z[k])
-      q.setFromAxisAngle(up, c.hd[k])
-      m4.compose(pos, q, sc.setScalar(glow * c.sz[k]))
-      eyes.setMatrixAt(k, m4)
-    }
-    cats.instanceMatrix.needsUpdate = true
-    eyes.instanceMatrix.needsUpdate = true
-    eyes.visible = night > 0.4
+    wild.update(dt, t, night, rain, px, pz)
   }
 
   const slotPose = (k: number) => {
@@ -1132,198 +1177,7 @@ export function buildEntities(tex: Textures, seed = 5150, doors: Door[] = [], pa
     return true
   }
 
-  // ---- birds: two-triangle wings circling the parks, perching, and lifting off when you walk under
-  const NBIRD = 14
-  const birdMat = new THREE.MeshBasicMaterial({ color: 0x22262b, side: THREE.DoubleSide })
-  const wingGeo = (dir: number) => {
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, -0.24, 0, 0, 0.24, dir * 0.6, 0.05, 0]), 3))
-    g.computeVertexNormals()
-    return g
-  }
-  const wings: [THREE.InstancedMesh, number][] = [
-    [new THREE.InstancedMesh(wingGeo(1), birdMat, NBIRD), 1],
-    [new THREE.InstancedMesh(wingGeo(-1), birdMat, NBIRD), -1],
-  ]
-  for (const [m] of wings) {
-    m.frustumCulled = false
-    group.add(m)
-  }
-  const brnd = rng(seed + 991)
-  const b = {
-    home: new Int8Array(NBIRD), st: new Int8Array(NBIRD), a: new Float32Array(NBIRD), r: new Float32Array(NBIRD),
-    w: new Float32Array(NBIRD), cy: new Float32Array(NBIRD), ph: new Float32Array(NBIRD), t: new Float32Array(NBIRD),
-    g: new Float32Array(NBIRD), x: new Float32Array(NBIRD), z: new Float32Array(NBIRD), y: new Float32Array(NBIRD),
-    hd: new Float32Array(NBIRD), vx: new Float32Array(NBIRD), vz: new Float32Array(NBIRD),
-    sr: new Float32Array(NBIRD), sz: new Float32Array(NBIRD), px: new Float32Array(NBIRD), pz: new Float32Array(NBIRD),
-  }
-  for (let k = 0; k < NBIRD; k++) {
-    const home = parks[k % parks.length]
-    const pa = brnd() * Math.PI * 2
-    const pr = 3 + brnd() * 9
-    b.home[k] = k % parks.length
-    b.px[k] = home.x + Math.cos(pa) * pr
-    b.pz[k] = home.z + Math.sin(pa) * pr
-    b.a[k] = pa
-    b.r[k] = pr
-    b.w[k] = (0.22 + brnd() * 0.28) * (brnd() < 0.5 ? -1 : 1)
-    b.cy[k] = 4.5 + brnd() * 5
-    b.ph[k] = brnd() * 9
-    b.sr[k] = 6 + brnd() * 5
-    b.sz[k] = 0.5 + brnd() * 0.35
-    b.st[k] = brnd() < 0.5 ? 2 : 0
-    b.t[k] = brnd() * 20
-    b.g[k] = brnd() * 14
-    b.x[k] = b.px[k]
-    b.z[k] = b.pz[k]
-    b.y[k] = b.st[k] === 2 ? 0.22 : b.cy[k]
-  }
-  const qd = new THREE.Quaternion()
-  const rollAxis = new THREE.Vector3(0, 0, 1)
-
-  // ---- fireflies: additive point clouds drifting over greenery after dusk (C8). One cloud
-  // hovers the park trees, a wider one the roadside trees; shared shader, separate gate.
-  const ffMat = new THREE.ShaderMaterial({
-    uniforms: { map: { value: tex.glow }, tint: { value: new THREE.Color(0xaeea5a) }, bright: { value: 0 }, t: { value: 0 } },
-    vertexShader: `
-      attribute float phase;
-      uniform float t;
-      varying float vA;
-      void main() {
-        vec3 p = position;
-        p.x += sin(t * 0.6 + phase) * 0.6;
-        p.y += sin(t * 0.9 + phase * 1.7) * 0.35;
-        p.z += cos(t * 0.5 + phase) * 0.6;
-        vec4 mv = modelViewMatrix * vec4(p, 1.0);
-        float d = max(0.001, -mv.z);
-        float tw = 0.5 + 0.5 * sin(t * 2.5 + phase * 4.0);
-        gl_PointSize = clamp(120.0 / d, 2.0, 16.0) * (0.6 + 0.4 * tw);
-        vA = tw * smoothstep(180.0, 8.0, d);
-        gl_Position = projectionMatrix * mv;
-      }`,
-    fragmentShader: `
-      uniform sampler2D map;
-      uniform vec3 tint;
-      uniform float bright;
-      varying float vA;
-      void main() {
-        float a = texture2D(map, gl_PointCoord).a * vA * bright;
-        gl_FragColor = vec4(tint * a, a);
-      }`,
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  })
-  const frnd = rng(seed + 7331)
-  const mkFlies = (homes: { x: number; z: number }[], n: number) => {
-    const fp = new Float32Array(n * 3)
-    const fphase = new Float32Array(n)
-    for (let k = 0; k < n; k++) {
-      const home = homes[k % homes.length]
-      const a = frnd() * Math.PI * 2
-      const r = 2 + frnd() * 8
-      fp[k * 3] = home.x + Math.cos(a) * r
-      fp[k * 3 + 1] = 0.7 + frnd() * 1.8
-      fp[k * 3 + 2] = home.z + Math.sin(a) * r
-      fphase[k] = frnd() * Math.PI * 2
-    }
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.BufferAttribute(fp, 3))
-    g.setAttribute('phase', new THREE.BufferAttribute(fphase, 1))
-    const mat = ffMat.clone()
-    const p = new THREE.Points(g, mat)
-    p.frustumCulled = false
-    p.renderOrder = 6
-    p.visible = false
-    group.add(p)
-    return { p, mat }
-  }
-  // roadside trees sit at the four corners of every block — reuse that grid for street fireflies
-  const streetHomes: { x: number; z: number }[] = []
-  for (let i = 0; i < N - 1; i++)
-    for (let j = 0; j < N - 1; j++)
-      for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as const)
-        if (frnd() < 0.45)
-          streetHomes.push({
-            x: dx > 0 ? line(i) + ROAD / 2 + 2.2 : line(i + 1) - ROAD / 2 - 2.2,
-            z: dz > 0 ? line(j) + ROAD / 2 + 2.2 : line(j + 1) - ROAD / 2 - 2.2,
-          })
-  const parkFlies = mkFlies(parks.length ? parks : [{ x: 0, z: 0 }], 26)
-  const streetFlies = mkFlies(streetHomes.length ? streetHomes : [{ x: 0, z: 0 }], 30)
-
-  // ---- pigeons: a few ground birds on the plaza that scatter when you approach
-  const NPIG = 7
-  const pigMat = new THREE.MeshStandardMaterial({ color: 0x6b6f75, roughness: 0.9 })
-  const pigeons = new THREE.InstancedMesh(new THREE.SphereGeometry(0.13, 7, 5), pigMat, NPIG)
-  pigeons.frustumCulled = false
-  group.add(pigeons)
-  const prnd = rng(seed + 1207)
-  const pig = {
-    home: new Int8Array(NPIG), st: new Int8Array(NPIG), g: new Float32Array(NPIG),
-    x: new Float32Array(NPIG), y: new Float32Array(NPIG), z: new Float32Array(NPIG),
-    bx: new Float32Array(NPIG), bz: new Float32Array(NPIG), hd: new Float32Array(NPIG),
-    vx: new Float32Array(NPIG), vz: new Float32Array(NPIG), ph: new Float32Array(NPIG), sz: new Float32Array(NPIG),
-  }
-  for (let k = 0; k < NPIG; k++) {
-    const home = parks[k % parks.length]
-    const a = prnd() * Math.PI * 2
-    const r = 1 + prnd() * 5
-    pig.home[k] = k % parks.length
-    pig.bx[k] = home.x + Math.cos(a) * r
-    pig.bz[k] = home.z + Math.sin(a) * r
-    pig.x[k] = pig.bx[k]
-    pig.z[k] = pig.bz[k]
-    pig.y[k] = 0.18
-    pig.hd[k] = prnd() * Math.PI * 2
-    pig.ph[k] = prnd() * 9
-    pig.sz[k] = 0.8 + prnd() * 0.4
-    pig.g[k] = prnd() * 18
-  }
-
-  // ---- alley cats: small box critters that perch on the dumpster lid when you approach
-  const NCAT = alleys.length
-  const cat = {
-    st: new Int8Array(NCAT), g: new Float32Array(NCAT),
-    x: new Float32Array(NCAT), y: new Float32Array(NCAT), z: new Float32Array(NCAT),
-    hx: new Float32Array(NCAT), hz: new Float32Array(NCAT),
-    px: new Float32Array(NCAT), py: new Float32Array(NCAT), pz: new Float32Array(NCAT),
-    hd: new Float32Array(NCAT), sz: new Float32Array(NCAT),
-  }
-  const crnd = rng(seed + 4409)
-  for (let k = 0; k < NCAT; k++) {
-    const a = alleys[k]
-    cat.hx[k] = a.x; cat.hz[k] = a.z; cat.x[k] = a.x; cat.z[k] = a.z; cat.y[k] = 0.16
-    cat.px[k] = a.px; cat.pz[k] = a.pz; cat.py[k] = a.py
-    cat.hd[k] = Math.atan2(a.x - a.px, a.z - a.pz)
-    cat.sz[k] = 0.85 + crnd() * 0.35
-  }
-  const fur = new THREE.Color(0x2f3540)
-  const catGeo = mergeGeometries(
-    [
-      paint(boxAt(0.16, 0.22, 0.42, 0, 0.24, 0), fur),
-      paint(boxAt(0.18, 0.16, 0.16, 0, 0.36, 0.24), fur),
-      paint(mergeGeometries([boxAt(0.05, 0.07, 0.02, -0.06, 0.48, 0.24), boxAt(0.05, 0.07, 0.02, 0.06, 0.48, 0.24)], false)!, fur),
-      paint(boxAt(0.05, 0.05, 0.28, 0, 0.3, -0.32), fur),
-      paint(mergeGeometries([boxAt(0.04, 0.2, 0.04, -0.06, 0.1, 0.14), boxAt(0.04, 0.2, 0.04, 0.06, 0.1, 0.14), boxAt(0.04, 0.2, 0.04, -0.06, 0.1, -0.14), boxAt(0.04, 0.2, 0.04, 0.06, 0.1, -0.14)], false)!, new THREE.Color(0x232833)),
-    ],
-    false,
-  )!
-  const catMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 })
-  const cats = new THREE.InstancedMesh(catGeo, catMat, Math.max(1, NCAT))
-  cats.frustumCulled = false
-  cats.castShadow = true
-  cats.count = NCAT
-  group.add(cats)
-  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffd36b, toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })
-  const eyes = new THREE.InstancedMesh(
-    mergeGeometries([boxAt(0.05, 0.05, 0.02, -0.06, 0, 0.1), boxAt(0.05, 0.05, 0.02, 0.06, 0, 0.1)], false)!,
-    eyeMat,
-    Math.max(1, NCAT),
-  )
-  eyes.frustumCulled = false
-  eyes.count = NCAT
-  eyes.renderOrder = 6
-  group.add(eyes)
+  const wild = makeWildlife({ group, tex, seed, parks, alleys, meow: (x, z) => meowCb(x, z) })
 
   update(0, 0, 12, 0, 0, 0, 0, false)
   return { group, update, tryEnter, drive, park, headlights, talkNearest, busHorn, onHonk: (fn: (x: number, z: number) => void) => { honkCb = fn }, onMeow: (fn: (x: number, z: number) => void) => { meowCb = fn }, onSiren: (fn: (x: number, z: number) => void) => { sirenCb = fn }, pedWorld: () => ({ px: ped.px, pz: ped.pz, n: pedVisible }), carWorld: () => ({ x: car.cx, z: car.cz, n: activeN }), carPush, vehPush }

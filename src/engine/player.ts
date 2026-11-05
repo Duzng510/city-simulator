@@ -16,7 +16,7 @@ export interface Player {
   dist: number
   speed: number
   update: (dt: number, keys: Set<string>, city: City, move?: MoveInput) => void
-  aim: (camera: THREE.Camera, city: City, dt: number) => void
+  aim: (camera: THREE.Camera, city: City, dt: number, reduceMotion?: boolean) => void
 }
 
 export function makePlayer(spawn: THREE.Vector3): Player {
@@ -68,7 +68,7 @@ export function makePlayer(spawn: THREE.Vector3): Player {
       }
       root.position.copy(pos)
     },
-    aim: (camera, city, dt) => {
+    aim: (camera, city, dt, reduceMotion) => {
       target.set(pos.x, pos.y + 1.45, pos.z)
       const lead = Math.min(self.speed * 0.4, 2.5)
       if (lead > 0) {
@@ -101,7 +101,7 @@ export function makePlayer(spawn: THREE.Vector3): Player {
       camera.up.copy(yUp)
       if (dt > 0) {
         const s = self.speed
-        const shake = clamp((s - 5) / 15, 0, 1) * 0.08
+        const shake = reduceMotion ? 0 : clamp((s - 5) / 15, 0, 1) * 0.08
         if (shake > 0) {
           camera.position.x += (Math.random() - 0.5) * shake
           camera.position.y += (Math.random() - 0.5) * shake * 0.6

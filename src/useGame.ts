@@ -1,39 +1,39 @@
 import { useEffect, useRef, useState } from 'react'
-import { createEngine, type Effects, type Mode, type Stats, type Tier } from './engine/engine'
+import { createEngine } from './engine/engine'
+import type { Effects, EngineState, Stats } from './engine/types'
 import { type Eng } from './ui/eng'
 
+const DEFAULT_SETTINGS: EngineState = {
+  h: 17.8, rain: 0, tier: 'low', mode: 'player', bloom: 1, rays: 1, motion: 0, ca: 0,
+  scale: 240, ambient: 0.5, adaptive: false, filter: 'none',
+  effects: { shadows: true, ao: true, bloom: true, rays: true, grain: true, grade: true },
+}
+
+// React chỉ giữ bản sao để hiển thị; engine là nguồn sự thật duy nhất. Mọi thay đổi đi qua
+// patch() → engine.patchSettings (atomic: preset chỉ rebuild composer 1 lần) rồi đọc getState()
+// back vào settings. Stats vẫn tới ~2.5Hz cho HUD realtime (fps/speed/paused).
 export function useGame(onLine?: (t: string) => void) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engRef = useRef<Eng | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
-  const [tier, setTier] = useState<Tier>(() => (new URLSearchParams(location.search).get('tier') as Tier) || 'low')
-  const [mode, setMode] = useState<Mode>('player')
-  const [hour, setHour] = useState(19.4)
-  const [scale, setScale] = useState(240)
-  const [bloom, setBloom] = useState(1)
-  const [rays, setRays] = useState(1)
-  const [motion, setMotion] = useState(0)
-  const [ca, setCa] = useState(0)
-  const [rain, setRain] = useState(() => Number(new URLSearchParams(location.search).get('rain')) || 0)
-  const [ambient, setAmbient] = useState(0.5)
-  const [paused, setPaused] = useState(false)
-  const [effects, setEffects] = useState<Effects>({ shadows: true, ao: true, bloom: true, rays: true, grain: true, grade: true })
+  const [settings, setSettings] = useState<EngineState>(DEFAULT_SETTINGS)
 
   useEffect(() => {
+    let e: Eng | null = null
     const eng = createEngine(
       canvasRef.current!,
       (s) => {
         setStats(s)
-        setPaused(s.paused)
-        setHour(s.hour)
-        setMode(s.mode)
-        setTier((t) => (t === s.tier ? t : s.tier))
+        // tier có thể đổi khi adaptive tuning chạy; kéo settings mỗi stats tick để slider mirror
+        // luôn phản ánh sim.tier/sim.paused thật.
+        if (e) setSettings(e.getState())
       },
       onLine,
     )
+    e = eng
     engRef.current = eng
-    eng.setEffects(effects)
-    eng.setMode('observe')
+    setSettings(eng.getState())
+    // setIdle(true) mirror-đổi render sang observe cho menu drift; intent (settings.mode) giữ URL.
     eng.setIdle(true)
     return () => {
       eng.dispose()
@@ -41,11 +41,27 @@ export function useGame(onLine?: (t: string) => void) {
     }
   }, [])
 
-  // sync URL every 500ms when state settles
+  const eng = () => engRef.current
+
+  const patch = (p: Partial<EngineState>) => {
+    const e = engRef.current
+    if (!e) return
+    e.patchSettings(p)
+    setSettings(e.getState())
+  }
+
+  const toggleFx = (k: keyof Effects) => {
+    const next: Effects = { ...settings.effects, [k]: !settings.effects[k] }
+    patch({ effects: next })
+  }
+
+  const togglePause = () => { eng()?.setPaused(!stats?.paused) }
+
+  const startEngine = () => { engRef.current?.setIdle(false); engRef.current?.start() }
+
   useEffect(() => {
     const t = setTimeout(() => {
-      const s = eng()?.getState()
-      if (!s) return
+      const s = settings
       const q = new URLSearchParams()
       q.set('h', s.h.toFixed(2))
       if (s.rain > 0.01) q.set('rain', s.rain.toFixed(2))
@@ -53,41 +69,18 @@ export function useGame(onLine?: (t: string) => void) {
       if (s.mode !== 'player') q.set('mode', s.mode)
       if (s.bloom !== 1) q.set('bloom', s.bloom.toFixed(2))
       if (s.rays !== 1) q.set('rays', s.rays.toFixed(2))
+      if (s.motion > 0.01) q.set('motion', s.motion.toFixed(2))
+      if (s.ca > 0.01) q.set('ca', s.ca.toFixed(2))
+      if (s.scale !== 240) q.set('scale', String(s.scale))
+      if (Math.abs(s.ambient - 0.5) > 0.01) q.set('ambient', s.ambient.toFixed(2))
+      if (s.adaptive) q.set('adaptive', '1')
+      if (s.filter !== 'none') q.set('filter', s.filter)
       const fxOff = (Object.keys(s.effects) as (keyof Effects)[]).filter((k) => !s.effects[k])
       if (fxOff.length) q.set('fx', fxOff.join(','))
       history.replaceState(null, '', `?${q.toString()}`)
     }, 500)
     return () => clearTimeout(t)
-  }, [hour, rain, tier, mode, bloom, rays, effects, paused])
+  }, [settings])
 
-  const eng = () => engRef.current
-
-  const setAll = {
-    hour: (v: number) => { setHour(v); eng()?.setTime(v) },
-    tier: (v: Tier) => { setTier(v); eng()?.setTier(v) },
-    bloom: (v: number) => { setBloom(v); eng()?.setBloom(v) },
-    rays: (v: number) => { setRays(v); eng()?.setRays(v) },
-    motion: (v: number) => { setMotion(v); eng()?.setMotion(v) },
-    ca: (v: number) => { setCa(v); eng()?.setCA(v) },
-    rain: (v: number) => { setRain(v); eng()?.setRain(v) },
-    scale: (v: number) => { setScale(v); eng()?.setTimeScale(v) },
-    ambient: (v: number) => { setAmbient(v); eng()?.setAmbient(v) },
-  }
-
-  const toggleFx = (k: keyof Effects) => {
-    const next = { ...effects, [k]: !effects[k] }
-    setEffects(next)
-    eng()?.setEffects(next)
-  }
-
-  const togglePause = () => { const p = !paused; setPaused(p); eng()?.setPaused(p) }
-
-  const startEngine = () => {
-    const e = engRef.current
-    e?.setIdle(false)
-    e?.setMode('player')
-    e?.start()
-  }
-
-  return { canvasRef, eng, stats, tier, mode, hour, scale, bloom, rays, motion, ca, rain, ambient, paused, effects, setAll, toggleFx, togglePause, startEngine }
+  return { canvasRef, eng, stats, settings, patch, toggleFx, togglePause, startEngine }
 }

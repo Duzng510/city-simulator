@@ -31,11 +31,12 @@ export interface City {
   puddles: THREE.InstancedMesh
   puddleSpots: { x: number; z: number; r: number }[]
   parkSpots: { x: number; z: number }[]
-  zoneCenters: { x: number; z: number; kind: 'park' | 'market' | 'plaza' | 'tower' }[]
+  zoneCenters: { x: number; z: number; kind: District }[]
   doors: THREE.InstancedMesh
   doorSpots: Door[]
   lampSpots: { x: number; z: number }[]
-  benches: { x: number; z: number }[]
+  benches: { x: number; z: number; ry: number }[]
+  awnings: { x: number; z: number; ry: number }[]
   vending: { x: number; z: number; ry: number }[]
   trash: { x: number; z: number }[]
   bikeRacks: { x: number; z: number }[]
@@ -156,9 +157,29 @@ type Style = 'tower' | 'midrise' | 'lowrise' | 'shop'
 // texture buckets: 1/3/6 are 3-floor grids for the tall stuff, the rest are 1-2-floor masonry rhythm
 const MODERN = [1, 3, 6]
 const MASONRY = [0, 2, 4, 5, 7]
+
+// C15 khu có cá tính: một bảng dữ liệu duy nhất mô tả từng khu, thay vì rải `if kind === ...`.
+// Thêm khu mới = thêm một dòng ở đây (+ một ô trong `special`), không sửa vòng lặp build.
+export type District = 'residential' | 'market' | 'park' | 'plaza' | 'industrial' | 'tower'
+export interface DistrictDef {
+  facade: number[] | null   // null → suy từ style như cũ (giữ layout các khu cũ)
+  lotDepth: number          // độ bổ đôi lô (splitLot)
+  tree: [number, number]    // [số cây bồi thêm, scale] — chỉ khu không có branch riêng dùng
+  litter: number            // xác suất rác/bẩn bồi thêm (0 → không gọi rand, giữ nguyên determinism)
+  puddle: number            // ≥0.5 → khu "đọng nước": vũng nước ưu tiên rơi vào đây
+  density: [number, number][] // đường cong mật độ theo 24h (x = giờ, y = nhân tử quanh 1)
+}
+export const DISTRICTS: Record<District, DistrictDef> = {
+  market:      { facade: null, lotDepth: 2, tree: [0, 0], litter: 0.5, puddle: 0.5, density: [[6, 0.6], [8, 1.1], [12, 1.3], [18, 1.15], [22, 0.85], [24, 0.5]] },
+  plaza:       { facade: null, lotDepth: 3, tree: [0, 0], litter: 0.2, puddle: 0.3, density: [[6, 0.6], [9, 1.0], [13, 1.25], [19, 1.2], [23, 0.8], [24, 0.5]] },
+  park:        { facade: null, lotDepth: 3, tree: [0, 0], litter: 0, puddle: 0.4, density: [[5, 1.1], [9, 0.9], [17, 1.1], [21, 0.5], [24, 0.3]] },
+  tower:       { facade: null, lotDepth: 3, tree: [0, 0], litter: 0, puddle: 0.1, density: [[6, 1.0], [9, 0.7], [17, 0.75], [19, 1.2], [22, 0.6], [24, 0.4]] },
+  residential: { facade: MASONRY, lotDepth: 3, tree: [5, 1.0], litter: 0.3, puddle: 0.15, density: [[6, 1.15], [9, 0.7], [17, 0.8], [19, 1.25], [22, 0.7], [24, 0.35]] },
+  industrial:  { facade: MODERN, lotDepth: 2, tree: [1, 0.8], litter: 0.6, puddle: 0.9, density: [[6, 0.7], [9, 0.9], [12, 1.0], [17, 0.95], [21, 0.6], [24, 0.4]] },
+}
 // hinge = world pivot of the door's left edge (outward offset baked in); ry = closed facing yaw
 export interface Door { hx: number; hy: number; hz: number; ry: number; exit?: { x: number; z: number } }
-type BuildingResult = { wallGeo: Geo; doorGeo: Geo | null; door: Door | null; roofGeo: Geo | null; propGeo: Geo | null; scaffoldGeo: Geo | null; laundryGeo: Geo | null; acs: { x: number; y: number; z: number }[]; topW: number; topD: number }
+type BuildingResult = { wallGeo: Geo; doorGeo: Geo | null; door: Door | null; roofGeo: Geo | null; propGeo: Geo | null; scaffoldGeo: Geo | null; laundryGeo: Geo | null; acs: { x: number; y: number; z: number }[]; awnings: { x: number; z: number; ry: number }[]; topW: number; topD: number }
 
 function buildingGeo(
   cx: number, cz: number, w: number, d: number, h: number,
@@ -170,6 +191,7 @@ function buildingGeo(
   const scaffoldBag: Bag = []
   const laundryBag: Bag = []
   const acs: { x: number; y: number; z: number }[] = []
+  const awn: { x: number; z: number; ry: number }[] = []
   let topW = w, topD = d
 
   // cap sits flat on the highest tier of every style — footprint passed in so it can shrink for towers
@@ -250,6 +272,8 @@ function buildingGeo(
     else { ax = cx + w / 2 + 0.4; az = cz; awid = 0.8; adep = aw }
     propBag.push(box(ax - awid / 2, ay, az - adep / 2, ax + awid / 2, ay + 0.1, az + adep / 2))
     propBag.push(box(ax - awid / 2, ay + 0.5, az - adep / 2, ax + awid / 2, ay + 1.1, az + adep / 2))
+    // F2: mái hiên cũng là chỗ trú mưa — ghi lại vị trí + hướng đứng dưới cho NPC
+    awn.push({ x: ax, z: az, ry: [Math.PI, 0, -Math.PI / 2, Math.PI / 2][face] })
   }
 
   if (style === 'tower') {
@@ -433,6 +457,7 @@ function buildingGeo(
     scaffoldGeo,
     laundryGeo,
     acs,
+    awnings: awn,
     topW, topD,
   }
 }
@@ -468,12 +493,13 @@ export function buildCity(tex: Textures, seed = 20261102): City {
   const trees: THREE.Matrix4[] = []
   const lamps: { x: number; z: number }[] = []
   const doorSpots: Door[] = []
-  const benches: { x: number; z: number }[] = []
+  const benches: { x: number; z: number; ry: number }[] = []
+  const awnings: { x: number; z: number; ry: number }[] = []
   const vending: { x: number; z: number; ry: number }[] = []
   const trash: { x: number; z: number }[] = []
   const bikeRacks: { x: number; z: number }[] = []
   const parkSpots: { x: number; z: number }[] = []
-  const zoneCenters: { x: number; z: number; kind: 'park' | 'market' | 'plaza' | 'tower' }[] = []
+  const zoneCenters: { x: number; z: number; kind: District }[] = []
   const acHumSpots: { x: number; z: number }[] = []
   const constructionSpots: { x: number; z: number }[] = []
   const acSpots: { x: number; y: number; z: number }[] = []
@@ -572,7 +598,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
       g.translate(x, 0, z)
       props.push(g)
     }
-    benches.push({ x, z })
+    benches.push({ x, z, ry: yaw + Math.PI })
   }
   const planter = (x: number, z: number) => {
     props.push(box(x - 0.5, 0, z - 0.5, x + 0.5, 0.5, z + 0.5))
@@ -686,7 +712,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
   group.add(shadowy(new THREE.Mesh(merge(roads), asphaltMat), false))
   group.add(new THREE.Mesh(merge(mark), markMat))
 
-  const special: Record<string, 'tower' | 'park' | 'market' | 'plaza'> = {
+  const special: Record<string, District> = {
     '6,6': 'tower',
     '2,2': 'park',
     '3,2': 'park',
@@ -695,6 +721,9 @@ export function buildCity(tex: Textures, seed = 20261102): City {
     '4,10': 'market',
     '5,10': 'market',
     '9,3': 'plaza',
+    '8,2': 'residential',
+    '9,2': 'residential',
+    '2,7': 'industrial',
   }
 
   for (let i = 0; i < N - 1; i++) {
@@ -704,6 +733,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
       const x1 = line(i + 1) - ROAD / 2
       const z1 = line(j + 1) - ROAD / 2
       const kind = special[`${i},${j}`]
+      const D = kind ? DISTRICTS[kind] : null
       if (kind) zoneCenters.push({ x: (x0 + x1) / 2, z: (z0 + z1) / 2, kind })
       const cx = (x0 + x1) / 2
       const cz = (z0 + z1) / 2
@@ -766,6 +796,9 @@ export function buildCity(tex: Textures, seed = 20261102): City {
         if (carts.length < 2) foodCart(x0 + 2.2, cz + (rand() < 0.5 ? -2.5 : 2.5))
       }
       if (rand() < 0.25) planter(x1 - 1.5, z0 + 3)
+      // C15 bồi cây + rác theo cá tính khu (cột > 0 mới gọi rand → ô generic/park/tower giữ nguyên layout)
+      if (D && D.tree[0] > 0) for (let t = 0; t < D.tree[0]; t++) putTree(lerp(x0 + 4, x1 - 4, rand()), lerp(z0 + 4, z1 - 4, rand()), D.tree[1])
+      if (D?.litter && rand() < D.litter) trashBag(cx + (rand() - 0.5) * 6, cz + (rand() - 0.5) * 6)
       if (!kind && nBB < 8 && rand() < 0.06) {
         nBB++
         const bxc = lerp(x0 + 10, x1 - 10, rand())
@@ -848,7 +881,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
         continue
       }
 
-      splitLot({ x0: x0 + 3.2, z0: z0 + 3.2, x1: x1 - 3.2, z1: z1 - 3.2 }, rand, kind === 'market' ? 2 : 3, lots)
+      splitLot({ x0: x0 + 3.2, z0: z0 + 3.2, x1: x1 - 3.2, z1: z1 - 3.2 }, rand, D?.lotDepth ?? 3, lots)
       const urban = 1 - clamp(dist / (HALF * 0.8), 0, 1)
       for (const l of lots) {
         const w = l.x1 - l.x0
@@ -866,7 +899,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
         h = Math.round(h / TILE) * TILE
         const bw = bx1 - bx0, bd = bz1 - bz0
         const style: Style = h > 80 ? 'tower' : h > 35 ? 'midrise' : rand() < 0.35 ? 'shop' : 'lowrise'
-        const grp = style === 'tower' || style === 'midrise' ? MODERN : MASONRY
+        const grp = D?.facade ?? (style === 'tower' || style === 'midrise' ? MODERN : MASONRY)
         const v = grp[Math.floor(rand() * grp.length)]
         const built = buildingGeo((bx0 + bx1) / 2, (bz0 + bz1) / 2, bw, bd, h, style, rand)
         wall[v].push(built.wallGeo)
@@ -906,6 +939,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
         if (built.scaffoldGeo && constructionSpots.length < 12) constructionSpots.push({ x: (bx0 + bx1) / 2, z: (bz0 + bz1) / 2 })
         if (built.acs.length && acHumSpots.length < 24) acHumSpots.push({ x: (bx0 + bx1) / 2, z: (bz0 + bz1) / 2 })
         for (const a of built.acs) if (acSpots.length < 4) acSpots.push(a)
+        for (const a of built.awnings) awnings.push(a)
         // C9 — ground-floor windows spill light onto the pavement at low sun; thin to ~40% of
         // buildings so the shafts spread across the whole grid instead of clustering at the cap
         if (shaftSpots.length < SHAFT_CAP && rand() < 0.4) {
@@ -1072,10 +1106,19 @@ export function buildCity(tex: Textures, seed = 20261102): City {
 
   // 10 fixed low spots on the roads; the engine ramps opacity (fill 5min in rain, drain 30min dry)
   const PUD = 10
+  const wetZones = zoneCenters.filter((z) => DISTRICTS[z.kind].puddle >= 0.5) // C15 khu "đọng nước": market + industrial
   const puddleSpots: { x: number; z: number; r: number }[] = []
   const puddleMat = poolMat.clone()
   const puddles = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), puddleMat, PUD)
   for (let k = 0; k < PUD; k++) {
+    if (wetZones.length && rand() < 0.5) {
+      const zw = wetZones[Math.floor(rand() * wetZones.length)]
+      const s = 4 + rand() * 6
+      const wx = zw.x + (rand() - 0.5) * CELL * 0.6, wz = zw.z + (rand() - 0.5) * CELL * 0.6
+      puddleSpots.push({ x: wx, z: wz, r: s / 2 })
+      puddles.setMatrixAt(k, new THREE.Matrix4().makeScale(s, 1, s).setPosition(wx, 0.07, wz))
+      continue
+    }
     const onX = k % 2 === 0
     const idx = Math.floor(rand() * N)
     const across = line(idx) + (rand() - 0.5) * ROAD * 0.7
@@ -1092,7 +1135,7 @@ export function buildCity(tex: Textures, seed = 20261102): City {
   group.add(puddles)
 
   // trees: one instanced merged geometry, vertex colours separate canopy from trunk
-  const canopy = new THREE.IcosahedronGeometry(2.2, 1).toNonIndexed()
+  const canopy = new THREE.IcosahedronGeometry(2.2, 1)
   const trunk = new THREE.CylinderGeometry(0.22, 0.34, 3.2, 6).toNonIndexed()
   trunk.translate(0, 1.6, 0)
   canopy.translate(0, 4.4, 0)
@@ -1193,5 +1236,5 @@ export function buildCity(tex: Textures, seed = 20261102): City {
     pos.z = clamp(pos.z, -HALF - 60, HALF + 60)
   }
 
-  return { group, spawn, blockers, hit, facadeMats, bbMats, treeMat, propMat, asphaltMat, lampGlow, neonMat, neonReflMat, pools, puddles, puddleSpots, parkSpots, zoneCenters, doors, doorSpots, lampSpots: lamps, benches, vending, trash, bikeRacks, acSpots, acHumSpots, constructionSpots, steamSpots: [...manholeSpots.slice(0, 3).map((m) => ({ x: m.x, y: 0.15, z: m.z })), ...cartSteam], carts, cafeTables, alleySpots, shaftSpots }
+  return { group, spawn, blockers, hit, facadeMats, bbMats, treeMat, propMat, asphaltMat, lampGlow, neonMat, neonReflMat, pools, puddles, puddleSpots, parkSpots, zoneCenters, doors, doorSpots, lampSpots: lamps, benches, awnings, vending, trash, bikeRacks, acSpots, acHumSpots, constructionSpots, steamSpots: [...manholeSpots.slice(0, 3).map((m) => ({ x: m.x, y: 0.15, z: m.z })), ...cartSteam], carts, cafeTables, alleySpots, shaftSpots }
 }
